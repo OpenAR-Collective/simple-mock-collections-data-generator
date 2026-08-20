@@ -21,7 +21,9 @@ from the data.
 Usage:  python generate.py
 """
 
+import argparse
 import csv
+import math
 import os
 import random
 from datetime import date, datetime, timedelta
@@ -42,7 +44,8 @@ NOTE_ACTIVITY_MEAN = 16
 NOTE_ACTIVITY_SD = 6
 HISTORY_START = TODAY - timedelta(days=1826)      # placements span 5 years
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(BASE_DIR, "data")
+OUT_DIR = os.path.join(BASE_DIR, "data")        # overridden by --out
+KEY_PATH = os.path.join(BASE_DIR, "ANSWER_KEY.md")   # overridden by --key
 
 rnd = random.Random(SEED)
 
@@ -277,18 +280,6 @@ def build_users():
 # Account status model
 # --------------------------------------------------------------------------
 
-OPEN_STATUSES = [("ACTIVE", 0.40), ("NEW", 0.09), ("PAYMENT_PLAN", 0.10),
-                 ("PAYMENT_PLAN_AT_RISK", 0.03), ("PROMISE_TO_PAY", 0.07), ("DISPUTED", 0.06),
-                 ("LEGAL", 0.05), ("SKIP_TRACE", 0.09), ("SKIP_NO_HIT", 0.04),
-                 ("HARDSHIP_REVIEW", 0.012), ("CLIENT_HOLD", 0.012), ("MILITARY_SCRA", 0.006),
-                 ("PENDING_CLIENT_REVIEW", 0.04)]
-
-CLOSED_STATUSES = [("PAID_IN_FULL", 0.19), ("SETTLED_IN_FULL", 0.14), ("RETURNED", 0.22),
-                   ("RECALLED", 0.07), ("BANKRUPTCY", 0.13), ("DECEASED", 0.05),
-                   ("UNCOLLECTIBLE", 0.13), ("STATUTE_EXPIRED", 0.07)]
-
-CLOSED_SET = {s for s, _ in CLOSED_STATUSES}
-
 PLAN_STATUSES = {"PAYMENT_PLAN", "PAYMENT_PLAN_AT_RISK"}
 
 # status_class is a denormalized rollup of account_status, one class per account.
@@ -306,6 +297,8 @@ STATUS_CLASS = {
     "RECALLED": "CLOSED", "BANKRUPTCY": "CLOSED", "DECEASED": "CLOSED",
     "UNCOLLECTIBLE": "CLOSED", "STATUTE_EXPIRED": "CLOSED",
 }
+
+CLOSED_SET = {s for s, cls in STATUS_CLASS.items() if cls == "CLOSED"}
 
 CLOSE_REASONS = {
     "PAID_IN_FULL": "PAID IN FULL", "SETTLED_IN_FULL": "SETTLEMENT SATISFIED",
@@ -393,6 +386,87 @@ def make_address(state):
     return line1, line2
 
 
+# --------------------------------------------------------------------------
+# Propensity to pay
+#
+# Liquidation here is not random. Every account gets a latent propensity drawn
+# from a logistic model over the things that actually drive collections
+# performance, and that latent score then decides whether the account pays, how
+# much and how often, what status it ends in, how its phone calls go, and what
+# vendor score it carries.
+#
+# The coefficients are fixed constants, not seeded, so two data sets built with
+# different seeds share one underlying model with different noise. A scorecard
+# fitted on one should hold its shape on the other. The values are chosen to be
+# plausible and to be learnable; they are not fitted to real portfolios, and
+# nothing here should be read as an empirical claim about real consumers.
+# --------------------------------------------------------------------------
+
+PROPENSITY_INTERCEPT = -0.95
+W_DEBT_AGE = -0.55            # per year between charge-off and placement
+W_LOG_BALANCE = -0.52         # per 10x of placement balance above a $250 base
+W_CLIENT_PAID = 0.75          # the consumer paid the original creditor at some point
+W_CLIENT_PAID_RECENCY = 0.60  # and how recently, decaying to nothing over two years
+W_HAS_CELL = 0.35             # contactability: you cannot collect from someone you cannot reach
+W_HAS_HOME = 0.15
+W_ADDRESS_GOOD = 0.25
+W_ADDRESS_BAD = -0.40
+PROPENSITY_NOISE_SD = 0.85    # keeps the ceiling realistic; a perfect model is not possible
+
+# Residual effect of what the debt is for, once balance is already accounted for.
+# Small utility and telecom balances get paid; deficiency and student paper does not.
+PRODUCT_PROPENSITY = {
+    "UTILITY": 0.35, "TELECOM": 0.30, "MEDICAL": 0.25, "DENTAL": 0.15,
+    "VETERINARY": 0.15, "GYM_MEMBERSHIP": 0.10, "RETAIL_CARD": 0.05,
+    "CREDIT_CARD": 0.00, "PERSONAL_LOAN": -0.15, "RENTAL": -0.20,
+    "SUBROGATION": -0.25, "AUTO_DEFICIENCY": -0.35, "STUDENT_LOAN": -0.40,
+}
+
+# Most of what an account will ever pay arrives in the first few months, so a
+# freshly placed account has not had time to show what it is worth.
+LIQUIDATION_TIME_CONSTANT_DAYS = 165
+
+# How placements are aged. Primary paper is fresh off charge-off; tertiary paper
+# has already been worked by two other agencies and is years old.
+PLACEMENT_STAGES = [("PRIMARY", 0.55, 45, 240), ("SECONDARY", 0.27, 300, 800),
+                    ("TERTIARY", 0.18, 850, 1800)]
+
+
+def sigmoid(z):
+    return 1.0 / (1.0 + math.exp(-z))
+
+
+def exposure(days_on_book):
+    """The share of an account's lifetime propensity that has had time to appear."""
+    return 1.0 - math.exp(-max(0, days_on_book) / LIQUIDATION_TIME_CONSTANT_DAYS)
+
+
+def propensity(debt_age_days, balance, client_paid_days_ago, product,
+               has_cell, has_home, address_status):
+    """Latent probability that this account ever pays anything."""
+    z = PROPENSITY_INTERCEPT
+    z += W_DEBT_AGE * (debt_age_days / 365.25)
+    z += W_LOG_BALANCE * math.log10(max(balance, 25.0) / 250.0)
+    if client_paid_days_ago is not None:
+        z += W_CLIENT_PAID
+        z += W_CLIENT_PAID_RECENCY * max(0.0, 1.0 - client_paid_days_ago / 730.0)
+    z += PRODUCT_PROPENSITY.get(product, 0.0)
+    z += W_HAS_CELL * has_cell + W_HAS_HOME * has_home
+    if address_status == "VERIFIED":
+        z += W_ADDRESS_GOOD
+    elif address_status == "BAD":
+        z += W_ADDRESS_BAD
+    z += rnd.gauss(0.0, PROPENSITY_NOISE_SD)
+    return sigmoid(z)
+
+
+# How a right party contact tends to go, relative to a propensity of 0.30.
+# A consumer who is going to pay promises and pays; one who is not argues.
+RPC_TILT = {"PROMISE_TO_PAY": 4.0, "PAYMENT_TAKEN": 4.5, "ARRANGEMENT_SET": 4.0,
+            "CALLBACK_SET": 0.3, "REFUSED_TO_PAY": -1.8, "DISPUTE_RAISED": -1.2,
+            "HARDSHIP": -0.7, "CEASE_DESIST": -1.3, "ATTORNEY_REP": -0.9}
+
+
 ACCOUNT_COLUMNS = [
     # System / account identifiers
     "account_id", "client_id", "client_account_number", "original_creditor", "product_type",
@@ -402,6 +476,7 @@ ACCOUNT_COLUMNS = [
     "original_balance", "placement_balance", "principal_balance", "interest_accrued",
     "fees_accrued", "adjustment_amount", "current_balance", "total_paid", "interest_rate_pct",
     "last_payment_date", "last_payment_amount",
+    "client_last_payment_date", "client_last_payment_amount",
     # Work management
     "assigned_user_id", "last_worked_date", "next_action_date", "collectability_score",
     "credit_reported_flag", "created_timestamp", "last_updated_timestamp",
@@ -431,37 +506,19 @@ def build_accounts(clients, users):
         # Placements skew toward the recent past; volume has grown over 5 years.
         age_days = int(1826 * (rnd.random() ** 1.35))
         placement = TODAY - timedelta(days=age_days)
-        charge_off = placement - timedelta(days=rnd.randint(25, 400))
+
+        # How stale the paper was when it arrived. This is the debt age feature,
+        # and it is deliberately not the same thing as time on book.
+        stage = weighted([(s, s[1]) for s in PLACEMENT_STAGES])
+        debt_age_days = rnd.randint(stage[2], stage[3])
+        charge_off = placement - timedelta(days=debt_age_days)
         dofd = charge_off - timedelta(days=rnd.randint(90, 240))
 
         low, high = BALANCE_RANGES[product]
         original = skewed_amount(low, high)
         placement_bal = round(original * (1 + rnd.uniform(0.0, 0.08)), 2) if chance(0.35) else original
 
-        # Older accounts are far more likely to have been closed out.
-        p_closed = min(0.70, max(0.02, 0.06 + 0.68 * (age_days / 1826)))
-        if age_days < 25:
-            status = "NEW" if chance(0.75) else weighted(OPEN_STATUSES)
-            closed = False
-        else:
-            closed = chance(p_closed)
-            status = weighted(CLOSED_STATUSES if closed else OPEN_STATUSES)
-            if status == "NEW" and age_days > 60:
-                status = "ACTIVE"
-            # A settlement cannot happen on a client that does not permit them.
-            if status == "SETTLED_IN_FULL" and client["allows_settlement"] == "N":
-                status = "PAID_IN_FULL"
-
-        if closed:
-            closed_date = rand_date(placement + timedelta(days=18), TODAY)
-            status_date = closed_date
-        else:
-            closed_date = None
-            status_date = rand_date(placement, TODAY)
-            if chance(0.6):
-                status_date = rand_date(max(placement, TODAY - timedelta(days=120)), TODAY)
-
-        # Consumer identity
+        # Consumer identity, decided before propensity because contactability feeds it.
         if chance(0.5):
             first = pick(FIRST_NAMES_F)
         else:
@@ -472,6 +529,73 @@ def build_accounts(clients, users):
         fmt = client["_phone_format"]
         dob = rand_date(date(1945, 1, 1), date(2005, 12, 31))
         dob_str = dob.strftime("%m/%d/%Y") if client["_dob_us_format"] else iso(dob)
+        consumer_age = (TODAY - dob).days / 365.25
+        address_status = weighted([("VERIFIED", 0.62), ("UNVERIFIED", 0.27), ("BAD", 0.11)])
+        phone_home = format_phone(state, fmt) if chance(0.55) else ""
+        phone_cell = format_phone(state, fmt) if chance(0.82) else ""
+        phone_work = format_phone(state, fmt) if chance(0.21) else ""
+
+        # Did the consumer ever pay the original creditor, and how long ago?
+        client_paid_date = None
+        client_paid_amount = 0.0
+        if chance(0.42):
+            client_paid_date = rand_date(dofd, charge_off)
+            client_paid_amount = round(max(10.0, placement_bal * rnd.uniform(0.02, 0.25)), 2)
+        client_paid_days_ago = (placement - client_paid_date).days if client_paid_date else None
+
+        # The latent score, and how much of it has had time to show up.
+        p_ever = propensity(debt_age_days, placement_bal, client_paid_days_ago, product,
+                            1 if phone_cell else 0, 1 if phone_home else 0, address_status)
+        paid_any = chance(p_ever * exposure(age_days))
+        resolved = paid_any and chance(0.12 + 0.45 * p_ever)
+        settled = resolved and client["allows_settlement"] == "Y" and chance(0.42)
+        if resolved:
+            paid_frac = 1.0
+        elif paid_any:
+            # Partial payers pay more of the balance the higher their propensity.
+            paid_frac = max(0.02, min(0.85, rnd.betavariate(1.2, 3.0) * (0.7 + 1.6 * p_ever)))
+        else:
+            paid_frac = 0.0
+
+        # Paying an account off closes it. Otherwise closure is a function of age.
+        p_closed = min(0.68, max(0.02, 0.02 + 0.62 * (age_days / 1826)))
+        closed = resolved or (age_days >= 25 and chance(p_closed))
+
+        if resolved:
+            status = "SETTLED_IN_FULL" if settled else "PAID_IN_FULL"
+        elif closed:
+            # Bankruptcy tracks balance, death tracks the consumer's age, and the
+            # statute runs out on old paper. None of that is about willingness to pay.
+            status = weighted([
+                ("RETURNED", 0.34), ("RECALLED", 0.11), ("UNCOLLECTIBLE", 0.21),
+                ("STATUTE_EXPIRED", 0.08 * (0.2 + 2.0 * min(1.0, debt_age_days / 1800))),
+                ("BANKRUPTCY", 0.18 * (0.5 + 1.5 * min(1.0, placement_bal / 8000))),
+                ("DECEASED", 0.08 * (0.3 + 2.5 * max(0.0, (consumer_age - 45) / 45))),
+            ])
+        elif paid_any:
+            status = weighted([("PAYMENT_PLAN", 0.42), ("PAYMENT_PLAN_AT_RISK", 0.16),
+                               ("PROMISE_TO_PAY", 0.22), ("ACTIVE", 0.20)])
+        elif age_days < 25:
+            status = "NEW" if chance(0.8) else "ACTIVE"
+        else:
+            # An account nobody can reach ends up in skip tracing; a big one ends up in legal.
+            reachable = bool(phone_cell or phone_home) and address_status != "BAD"
+            skip_tilt = 0.5 if reachable else 2.6
+            status = weighted([
+                ("ACTIVE", 0.38), ("SKIP_TRACE", 0.16 * skip_tilt), ("SKIP_NO_HIT", 0.07 * skip_tilt),
+                ("DISPUTED", 0.09), ("LEGAL", 0.07 * (0.2 + 1.8 * min(1.0, placement_bal / 3000))),
+                ("CLIENT_HOLD", 0.03), ("HARDSHIP_REVIEW", 0.03), ("MILITARY_SCRA", 0.012),
+                ("PENDING_CLIENT_REVIEW", 0.06), ("NEW", 0.05 if age_days < 60 else 0.0),
+            ])
+
+        if closed:
+            closed_date = rand_date(placement + timedelta(days=18), TODAY)
+            status_date = closed_date
+        else:
+            closed_date = None
+            status_date = rand_date(placement, TODAY)
+            if chance(0.6):
+                status_date = rand_date(max(placement, TODAY - timedelta(days=120)), TODAY)
 
         acct = {
             "account_id": acct_id,
@@ -495,7 +619,7 @@ def build_accounts(clients, users):
             "assigned_user_id": str(pick(active_collectors)),
             "last_worked_date": "",
             "next_action_date": "",
-            "collectability_score": str(rnd.randint(1, 99)),
+            "collectability_score": str(max(1, min(99, int(round(100 * p_ever + rnd.gauss(0, 13)))))),
             "credit_reported_flag": "Y" if (chance(0.18) and product in ("CREDIT_CARD", "RETAIL_CARD", "PERSONAL_LOAN")) else "N",
             "created_timestamp": ts(business_dt(placement, 6, 23)),
             "last_updated_timestamp": ts(business_dt(status_date, 6, 23)),
@@ -507,10 +631,8 @@ def build_accounts(clients, users):
             "date_of_birth": dob_str if chance(0.96) else "",
             "address_line1": line1, "address_line2": line2,
             "city": city, "state": state, "zip_code": zip5,
-            "address_status": weighted([("VERIFIED", 0.62), ("UNVERIFIED", 0.27), ("BAD", 0.11)]),
-            "phone_home": format_phone(state, fmt) if chance(0.55) else "",
-            "phone_cell": format_phone(state, fmt) if chance(0.82) else "",
-            "phone_work": format_phone(state, fmt) if chance(0.21) else "",
+            "address_status": address_status,
+            "phone_home": phone_home, "phone_cell": phone_cell, "phone_work": phone_work,
             "email": "",
             "employer_name": pick(EMPLOYERS) if chance(0.58) else "",
             "do_not_call_flag": "N", "cease_desist_flag": "N",
@@ -519,9 +641,12 @@ def build_accounts(clients, users):
             "bankruptcy_case_number": "", "bankruptcy_chapter": "", "bankruptcy_filed_date": "",
             "deceased_date": "",
             # Internal scratch, dropped before writing.
+            "client_last_payment_date": iso(client_paid_date),
+            "client_last_payment_amount": money(client_paid_amount) if client_paid_date else "",
             "_client": client, "_placement": placement, "_closed_date": closed_date,
             "_status_date": status_date, "_placement_bal": placement_bal, "_age_days": age_days,
-            "_phone_fmt": fmt,
+            "_phone_fmt": fmt, "_p_ever": p_ever, "_paid_any": paid_any, "_resolved": resolved,
+            "_settled": settled, "_paid_frac": paid_frac, "_debt_age_days": debt_age_days,
         }
 
         if chance(0.72):
@@ -584,28 +709,40 @@ FREQ_DAYS = {"MONTHLY": 30, "BIWEEKLY": 14, "WEEKLY": 7, "SEMIMONTHLY": 15}
 
 
 def payment_plan_for(acct):
-    """How many payments an account made, and what they add up to."""
-    status = acct["account_status"]
+    """
+    How many payments an account made and what they add up to.
+
+    The decision itself was already made in build_accounts from the latent
+    propensity; this only turns that outcome into a schedule. Higher propensity
+    accounts pay more often as well as more, which is what makes "has already
+    paid once" such a strong predictor of paying again.
+    """
+    if not acct["_paid_any"]:
+        return 0, 0.0, 0.0
+
     total_due = acct["_total_due"]
-    if status == "PAID_IN_FULL":
-        return rnd.randint(1, 7), total_due, 0.0
-    if status == "SETTLED_IN_FULL":
+    p = acct["_p_ever"]
+    frac = acct["_paid_frac"]
+    adjustment = 0.0
+
+    if acct["_resolved"] and acct["_settled"]:
         floor = int(acct["_client"]["min_settlement_pct"]) / 100.0
         # A few settlements were approved under the client's contractual floor (defect A27).
         pct = rnd.uniform(0.15, floor - 0.05) if acct.get("_under_settle") else rnd.uniform(floor, 0.95)
-        settle = round(total_due * pct, 2)
-        return rnd.randint(1, 4), settle, round(settle - total_due, 2)
-    if status in PLAN_STATUSES:
-        n = rnd.randint(1, 18)
-        return n, round(min(total_due * rnd.uniform(0.05, 0.85), total_due), 2), 0.0
-    if status == "PROMISE_TO_PAY":
-        return (rnd.randint(1, 3), round(total_due * rnd.uniform(0.02, 0.35), 2), 0.0) if chance(0.45) else (0, 0.0, 0.0)
-    if status in ("ACTIVE", "CLIENT_HOLD", "HARDSHIP_REVIEW", "MILITARY_SCRA",
-                  "DISPUTED", "LEGAL", "PENDING_CLIENT_REVIEW"):
-        return (rnd.randint(1, 5), round(total_due * rnd.uniform(0.02, 0.45), 2), 0.0) if chance(0.24) else (0, 0.0, 0.0)
-    if status in ("BANKRUPTCY", "DECEASED", "RETURNED", "RECALLED", "UNCOLLECTIBLE", "STATUTE_EXPIRED"):
-        return (rnd.randint(1, 4), round(total_due * rnd.uniform(0.02, 0.30), 2), 0.0) if chance(0.14) else (0, 0.0, 0.0)
-    return 0, 0.0, 0.0
+        target = round(total_due * pct, 2)
+        adjustment = round(target - total_due, 2)
+    elif acct["_resolved"]:
+        target = total_due
+    else:
+        target = round(min(total_due * frac, total_due), 2)
+
+    if acct["_resolved"]:
+        # A payoff is usually a single payment, occasionally a short run of them.
+        n = weighted([(1, 0.34), (2, 0.19), (3, 0.13), (4, 0.10), (6, 0.09),
+                      (8, 0.07), (12, 0.05), (18, 0.03)])
+    else:
+        n = int(round(1 + 12 * min(1.0, frac) * (0.4 + 0.9 * p) * rnd.uniform(0.6, 1.4)))
+    return max(1, min(24, n)), target, adjustment
 
 
 def build_money(accounts, users):
@@ -844,25 +981,25 @@ DIAL_RESULTS = [
 ]
 
 RPC_OUTCOMES = [
-    ("PROMISE_TO_PAY", 0.26,
+    ("PROMISE_TO_PAY", 0.15,
      "RPC with consumer, identity verified with date of birth and last four of SSN. Reviewed balance of ${bal}. "
      "Consumer committed to pay ${amt} on {fdate}. Confirmation letter requested."),
-    ("REFUSED_TO_PAY", 0.16,
+    ("REFUSED_TO_PAY", 0.22,
      "RPC with consumer. Consumer states they will not pay, \"this bill is not mine and I never signed anything.\" "
      "Advised of validation rights. No further commitment obtained."),
-    ("HARDSHIP", 0.12,
+    ("HARDSHIP", 0.13,
      "RPC with consumer. Reports reduced hours at {employer} and is behind on rent. Requested hardship review; "
      "gathering income documentation before any arrangement is set."),
-    ("DISPUTE_RAISED", 0.10,
+    ("DISPUTE_RAISED", 0.12,
      "RPC with consumer. Consumer disputes the balance, states the account was paid directly to {creditor} "
      "before placement. Dispute logged, collection activity suspended pending validation."),
-    ("PAYMENT_TAKEN", 0.10,
+    ("PAYMENT_TAKEN", 0.07,
      "RPC with consumer. Took payment of ${amt} by {method} over the phone. Receipt emailed at consumer request."),
-    ("ARRANGEMENT_SET", 0.08,
+    ("ARRANGEMENT_SET", 0.05,
      "RPC with consumer. Negotiated {n} {freq} installments of ${inst} beginning {fdate}. Terms read back and accepted."),
-    ("CALLBACK_SET", 0.08,
+    ("CALLBACK_SET", 0.14,
      "RPC with consumer. Consumer states they are at work and cannot talk. Callback scheduled for {fdate}."),
-    ("CEASE_DESIST", 0.04,
+    ("CEASE_DESIST", 0.05,
      "RPC with consumer. Consumer stated, \"stop calling me, I do not want to hear from you again.\" "
      "Cease and desist request documented."),
     ("ATTORNEY_REP", 0.03,
@@ -1007,7 +1144,13 @@ def build_notes(accounts, users, writer):
                 phone = pick(phones)
                 result = weighted([(r, w) for r, w, _ in DIAL_RESULTS])
                 if result == "RPC":
-                    outcome = weighted([(o, w) for o, w, _ in RPC_OUTCOMES])
+                    # How the conversation goes depends on the same latent propensity
+                    # that drives payment, so the notes carry real signal.
+                    tilt = acct["_p_ever"] - 0.30
+                    outcome = weighted([(o, max(0.005, w * (1.0 + RPC_TILT.get(o, 0.0) * tilt)))
+                                        for o, w, _ in RPC_OUTCOMES])
+                    if outcome == "PAYMENT_TAKEN" and not acct["_payments"]:
+                        outcome = "PROMISE_TO_PAY"      # do not log a payment that never posted
                     template = next(t for o, _, t in RPC_OUTCOMES if o == outcome)
                     follow = ""
                     if outcome in ("PROMISE_TO_PAY", "CALLBACK_SET", "ARRANGEMENT_SET"):
@@ -1566,6 +1709,20 @@ def corrupt_accounts(accounts, users, clients):
            "status_class is a denormalized rollup of account_status. Rebuild it from the status and "
            "compare, rather than trusting the stored value.")
 
+    # A30 -- the consumer paid the creditor directly after the account was placed.
+    targets = sample(40, lambda a: a["client_last_payment_date"] and a["account_status"] not in CLOSED_SET)
+    for a in targets:
+        after = rand_date(a["_placement"] + timedelta(days=10), TODAY)
+        a["client_last_payment_date"] = iso(after)
+        a["client_last_payment_amount"] = money(round(float(a["placement_balance"].replace("$", "").replace(",", ""))
+                                                      * rnd.uniform(0.05, 0.4), 2))
+    record("A30", "accounts", "client_last_payment_date, placement_date",
+           "The last payment to the original creditor is dated after placement, so the consumer paid "
+           "the client directly while the agency kept collecting. The agency balance was never reduced.",
+           [a["account_id"] for a in targets],
+           "Real and expensive: it causes double collection and client disputes. Compare "
+           "client_last_payment_date against placement_date.")
+
     # A26 -- consumers with several accounts, which is legitimate and worth spotting.
     anchors = sample(30, lambda a: a["ssn"] and "-" in a["ssn"])
     linked = []
@@ -1752,8 +1909,36 @@ def write_csv(name, columns, rows):
     return path
 
 
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description="Generate a synthetic collections data set.",
+        epilog=("Example A/B pair:\n"
+                '  python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md\n'
+                '  python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md'),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--seed", default=SEED,
+                    help='Any text or integer. Default: "%(default)s"')
+    ap.add_argument("--out", default="data", help="Output directory. Default: %(default)s")
+    ap.add_argument("--key", default="ANSWER_KEY.md", help="Answer key path. Default: %(default)s")
+    ap.add_argument("--accounts", type=int, default=ACCOUNT_COUNT,
+                    help="Number of accounts. Default: %(default)s")
+    return ap.parse_args()
+
+
 def main():
+    global OUT_DIR, ACCOUNT_COUNT, KEY_PATH
+    args = parse_args()
+    # "12345" on the command line should mean the integer, not the text.
+    seed = args.seed
+    if isinstance(seed, str) and seed.lstrip("-").isdigit():
+        seed = int(seed)
+    rnd.seed(seed)
+    OUT_DIR = args.out if os.path.isabs(args.out) else os.path.join(BASE_DIR, args.out)
+    KEY_PATH = args.key if os.path.isabs(args.key) else os.path.join(BASE_DIR, args.key)
+    ACCOUNT_COUNT = args.accounts
+    ISSUES.clear()
     os.makedirs(OUT_DIR, exist_ok=True)
+    print(f'seed "{seed}" -> {os.path.relpath(OUT_DIR, BASE_DIR)}/')
 
     clients = build_clients()
     users = build_users()
@@ -1818,6 +2003,53 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
                  "person. Defect A11 is junk typed into the SSN field, not an invalid SSN, because "
                  "every SSN here is already unissuable.")
     lines.append("")
+    liq = sum(1 for a in accounts if float(a["total_paid"].replace("$", "").replace(",", "") or 0) > 0)
+    lines.append("## The propensity model")
+    lines.append("")
+    lines.append("Liquidation in this data is not random. Every account carries a latent propensity "
+                 "drawn from the fixed logistic model below, and that score decides whether it pays, "
+                 "how much and how often, what status it lands in, how its right party contacts go, "
+                 "and what `collectability_score` it carries.")
+    lines.append("")
+    lines.append("The coefficients are constants in `generate.py`, not seeded, so any two data sets "
+                 "share this model and differ only in noise. A scorecard fitted on one should hold "
+                 "its shape on the other. Run `python ab_check.py` to see that measured.")
+    lines.append("")
+    lines.append("Log-odds that an account ever pays anything:")
+    lines.append("")
+    lines.append("| Term | Coefficient |")
+    lines.append("| --- | ---: |")
+    lines.append(f"| Intercept | {PROPENSITY_INTERCEPT:+.2f} |")
+    lines.append(f"| Debt age at placement, per year from charge-off to placement | {W_DEBT_AGE:+.2f} |")
+    lines.append(f"| Placement balance, per 10x above a $250 base | {W_LOG_BALANCE:+.2f} |")
+    lines.append(f"| Consumer paid the original creditor at some point | {W_CLIENT_PAID:+.2f} |")
+    lines.append(f"| ... and how recently, decaying to zero over 24 months | {W_CLIENT_PAID_RECENCY:+.2f} |")
+    lines.append(f"| Cell phone on file | {W_HAS_CELL:+.2f} |")
+    lines.append(f"| Home phone on file | {W_HAS_HOME:+.2f} |")
+    lines.append(f"| Address status VERIFIED | {W_ADDRESS_GOOD:+.2f} |")
+    lines.append(f"| Address status BAD | {W_ADDRESS_BAD:+.2f} |")
+    for prod, w in sorted(PRODUCT_PROPENSITY.items(), key=lambda kv: -kv[1]):
+        lines.append(f"| Product type {prod} | {w:+.2f} |")
+    lines.append(f"| Gaussian noise, standard deviation | {PROPENSITY_NOISE_SD:.2f} |")
+    lines.append("")
+    lines.append(f"That latent score is then multiplied by an exposure term, "
+                 f"`1 - exp(-days_on_book / {LIQUIDATION_TIME_CONSTANT_DAYS})`, because an account "
+                 f"placed last month has not had time to show what it is worth. Debt age and time on "
+                 f"book are separate things here, and conflating them is the most common way to get "
+                 f"this analysis wrong.")
+    lines.append("")
+    lines.append(f"In this data set {liq:,} accounts ({liq / len(accounts):.1%}) paid something.")
+    lines.append("")
+    lines.append("Two modeling exercises this supports:")
+    lines.append("")
+    lines.append("1. **Placement scoring.** Predict liquidation using only what was known at "
+                 "placement: debt age, balance, client last payment, product type, contact data. "
+                 "This is the model the table above describes.")
+    lines.append("2. **In-treatment scoring.** Predict payment after day 90 using agency activity in "
+                 "the first 90 days, such as whether a right party contact happened or a promise to "
+                 "pay was logged. Those features are far stronger, and they are partly self "
+                 "fulfilling, so they only make sense with a time split. Without one they leak.")
+    lines.append("")
     lines.append("## Fields that are always reliable")
     lines.append("")
     lines.append("These are populated on every account row and are internally consistent, so participants "
@@ -1870,7 +2102,7 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
     ]:
         lines.append(f"- {item}")
     lines.append("")
-    with open(os.path.join(BASE_DIR, "ANSWER_KEY.md"), "w", encoding="utf-8") as fh:
+    with open(KEY_PATH, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
 
 

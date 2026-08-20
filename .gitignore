@@ -1,5 +1,7 @@
 # Generated output. Run "python generate.py" to produce these locally.
 data/
+data_*/
+ANSWER_KEY_*.md
 
 # Python
 __pycache__/

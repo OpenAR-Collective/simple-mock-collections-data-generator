@@ -8,14 +8,57 @@ Do not hand this file to participants. It lists every defect planted in the data
 | --- | ---: |
 | clients.csv | 16 |
 | users.csv | 49 |
-| accounts.csv | 10,000 (3,447 closed, 34.5%) |
-| payments.csv | 15,383 |
-| payment_arrangements.csv | 2,400 |
-| notes.csv | 200,115 |
+| accounts.csv | 10,000 (3,477 closed, 34.8%) |
+| payments.csv | 13,339 |
+| payment_arrangements.csv | 2,276 |
+| notes.csv | 197,573 |
 
 ## Identifier safety
 
 Every phone number in the set uses the 555 exchange and every SSN breaks an SSA issuance rule (area 000 / 666 / 900-999, group 00, or serial 0000), so none of them can reach or identify a real person. Defect A11 is junk typed into the SSN field, not an invalid SSN, because every SSN here is already unissuable.
+
+## The propensity model
+
+Liquidation in this data is not random. Every account carries a latent propensity drawn from the fixed logistic model below, and that score decides whether it pays, how much and how often, what status it lands in, how its right party contacts go, and what `collectability_score` it carries.
+
+The coefficients are constants in `generate.py`, not seeded, so any two data sets share this model and differ only in noise. A scorecard fitted on one should hold its shape on the other. Run `python ab_check.py` to see that measured.
+
+Log-odds that an account ever pays anything:
+
+| Term | Coefficient |
+| --- | ---: |
+| Intercept | -0.95 |
+| Debt age at placement, per year from charge-off to placement | -0.55 |
+| Placement balance, per 10x above a $250 base | -0.52 |
+| Consumer paid the original creditor at some point | +0.75 |
+| ... and how recently, decaying to zero over 24 months | +0.60 |
+| Cell phone on file | +0.35 |
+| Home phone on file | +0.15 |
+| Address status VERIFIED | +0.25 |
+| Address status BAD | -0.40 |
+| Product type UTILITY | +0.35 |
+| Product type TELECOM | +0.30 |
+| Product type MEDICAL | +0.25 |
+| Product type DENTAL | +0.15 |
+| Product type VETERINARY | +0.15 |
+| Product type GYM_MEMBERSHIP | +0.10 |
+| Product type RETAIL_CARD | +0.05 |
+| Product type CREDIT_CARD | +0.00 |
+| Product type PERSONAL_LOAN | -0.15 |
+| Product type RENTAL | -0.20 |
+| Product type SUBROGATION | -0.25 |
+| Product type AUTO_DEFICIENCY | -0.35 |
+| Product type STUDENT_LOAN | -0.40 |
+| Gaussian noise, standard deviation | 0.85 |
+
+That latent score is then multiplied by an exposure term, `1 - exp(-days_on_book / 165)`, because an account placed last month has not had time to show what it is worth. Debt age and time on book are separate things here, and conflating them is the most common way to get this analysis wrong.
+
+In this data set 2,872 accounts (28.7%) paid something.
+
+Two modeling exercises this supports:
+
+1. **Placement scoring.** Predict liquidation using only what was known at placement: debt age, balance, client last payment, product type, contact data. This is the model the table above describes.
+2. **In-treatment scoring.** Predict payment after day 90 using agency activity in the first 90 days, such as whether a right party contact happened or a promise to pay was logged. Those features are far stronger, and they are partly self fulfilling, so they only make sense with a time split. Without one they leak.
 
 ## Fields that are always reliable
 
@@ -25,27 +68,27 @@ These are populated on every account row and are internally consistent, so parti
 
 ### accounts
 
-**A1 - address_line1, city, state, zip_code** (553 rows)
+**A1 - address_line1, city, state, zip_code** (550 rows)
 
 Missing or incomplete consumer addresses, including literal 'UNKNOWN' text values.
 
 *About 6% of accounts. Note the several different shapes of 'missing'.*
 
-Sample ids: 500011, 500050, 500071, 500094, 500105, 500117
+Sample ids: 500005, 500030, 500036, 500057, 500062, 500075
 
-**A2 - zip_code** (511 rows)
+**A2 - zip_code** (484 rows)
 
 Northeast ZIP codes stored with the leading zero stripped (e.g. 2108 instead of 02108).
 
 *Classic spreadsheet round-trip damage. Look for zip_code shorter than 5 characters.*
 
-Sample ids: 509440, 502485, 507590, 502713, 506864, 504826
+Sample ids: 505500, 503373, 509620, 500733, 500125, 503167
 
 **A3 - state, zip_code** (35 rows)
 
 ZIP code does not fall in the stated state.
 
-Sample ids: 508661, 503378, 501938, 502295, 503972, 505227
+Sample ids: 509410, 506925, 508286, 500841, 509158, 505489
 
 **A4 - current_balance** (40 rows)
 
@@ -53,19 +96,19 @@ current_balance exceeds placement_balance on clients whose contract allows no in
 
 *Join accounts to clients on client_id and compare against allows_interest / allows_fees.*
 
-Sample ids: 509003, 504487, 506115, 509884, 504538, 509774
+Sample ids: 509955, 506937, 504676, 505582, 502129, 509037
 
 **A5 - account_status, current_balance** (25 rows)
 
 Accounts closed as PAID_IN_FULL or SETTLED_IN_FULL that still show a non-zero balance.
 
-Sample ids: 505910, 504872, 501052, 506922, 504321, 507294
+Sample ids: 508635, 507889, 506604, 509806, 504212, 506237
 
 **A6 - current_balance** (12 rows)
 
 Negative current_balance from unrefunded overpayments.
 
-Sample ids: 504822, 508616, 502051, 504095, 507962, 502006
+Sample ids: 501976, 509106, 507530, 505056, 509950, 506383
 
 **A7 - bankruptcy_case_number, bankruptcy_chapter, bankruptcy_filed_date** (18 rows)
 
@@ -73,7 +116,7 @@ BANKRUPTCY accounts missing the case number, chapter or filing date.
 
 *These fields should be fully populated for every BANKRUPTCY account.*
 
-Sample ids: 502087, 504923, 503377, 500293, 505106, 507774
+Sample ids: 508960, 502188, 505449, 502978, 501093, 500036
 
 **A8 - bankruptcy_case_number, account_status** (10 rows)
 
@@ -81,31 +124,31 @@ Bankruptcy case data present on accounts whose status is not BANKRUPTCY, so coll
 
 *The reverse of A7, and the more dangerous direction.*
 
-Sample ids: 500280, 506360, 507565, 509477, 507187, 508858
+Sample ids: 505942, 500042, 507114, 505511, 507366, 501139
 
 **A9a - deceased_date** (7 rows)
 
 DECEASED accounts with no date of death recorded.
 
-Sample ids: 506485, 507668, 500378, 509728, 506682, 508317
+Sample ids: 509152, 503428, 507315, 509316, 508035, 507472
 
 **A9b - deceased_date, placement_date** (5 rows)
 
 Date of death precedes the placement date; the account should never have been placed.
 
-Sample ids: 503165, 504579, 504932, 503661, 505235
+Sample ids: 507648, 507735, 509591, 507550, 509974
 
 **A10a - date_of_birth** (8 rows)
 
 Date of birth implies the consumer is under 18.
 
-Sample ids: 505928, 500742, 508690, 505822, 509346, 501682
+Sample ids: 509729, 505397, 503449, 504506, 505112, 509025
 
 **A10b - date_of_birth** (6 rows)
 
 Date of birth implies an age over 110.
 
-Sample ids: 503189, 506750, 500024, 509925, 500381, 503335
+Sample ids: 501477, 503002, 505010, 506572, 506073, 501522
 
 **A11 - ssn** (20 rows)
 
@@ -113,15 +156,15 @@ Placeholder and malformed junk in the SSN field: all zeros, repeated digits, seq
 
 *Every SSN in this file is deliberately unissuable, so these stand out by being the wrong shape rather than by being invalid.*
 
-Sample ids: 501757, 501584, 505492, 506933, 500558, 502954
+Sample ids: 509271, 503749, 502505, 501120, 501875, 506872
 
 **A12 - ssn** (14 rows)
 
-Fourteen accounts with different consumer names share a single SSN (967-16-9529).
+Fourteen accounts with different consumer names share a single SSN (975-37-1630).
 
 *Group by ssn and count distinct last_name.*
 
-Sample ids: 500345, 507395, 501509, 502184, 509945, 505870
+Sample ids: 508335, 508465, 502451, 508601, 507788, 503143
 
 **A13 - phone_home, phone_cell** (60 rows)
 
@@ -129,13 +172,13 @@ Placeholder or malformed phone numbers, plus four different phone formats across
 
 *The formatting inconsistency is by client_id; the junk values are scattered.*
 
-Sample ids: 502038, 508371, 508751, 507704, 508793, 507124
+Sample ids: 502446, 503939, 502952, 507941, 509096, 504663
 
 **A14 - email** (90 rows)
 
 Invalid or placeholder email addresses.
 
-Sample ids: 507378, 503216, 501180, 501873, 506874, 500438
+Sample ids: 501302, 504867, 500695, 505777, 508633, 503926
 
 **A15 - client_id, client_account_number** (22 rows)
 
@@ -143,7 +186,7 @@ The same creditor account placed twice under two different account_ids, with sli
 
 *Group by client_id + client_account_number having count > 1. Sample values are id pairs.*
 
-Sample ids: 504210/501613, 503003/504294, 507254/504945, 504137/509274, 507434/506132, 507504/500861
+Sample ids: 507676/507976, 509126/508114, 505925/500115, 506085/509300, 502323/503080, 507724/508586
 
 **A16a - assigned_user_id** (120 rows)
 
@@ -151,37 +194,37 @@ Open accounts assigned to users whose user_status is TERMINATED.
 
 *Join accounts to users on assigned_user_id and filter on user_status.*
 
-Sample ids: 505285, 503227, 500287, 508817, 501475, 502476
+Sample ids: 505316, 506429, 500060, 507464, 501412, 507318
 
 **A16b - assigned_user_id** (9 rows)
 
 assigned_user_id values that do not exist in users.csv.
 
-Sample ids: 502344, 500498, 507244, 509204, 502069, 507495
+Sample ids: 500689, 506408, 500366, 507660, 502638, 502949
 
 **A17 - client_id** (4 rows)
 
 client_id values with no matching row in clients.csv.
 
-Sample ids: 500993, 504904, 500548, 500623
+Sample ids: 502469, 505756, 500664, 501389
 
 **A18 - first_name, last_name** (140 rows)
 
 Name hygiene problems: mixed casing, leading and trailing whitespace, suffixes stuffed into last_name, stray punctuation.
 
-Sample ids: 509819, 506443, 505269, 502827, 501114, 506841
+Sample ids: 507090, 502063, 507417, 507210, 503664, 507342
 
 **A19a - charge_off_date, placement_date** (15 rows)
 
 charge_off_date falls after placement_date; an account cannot be placed before it charges off.
 
-Sample ids: 500173, 509106, 500317, 509653, 504362, 500069
+Sample ids: 501533, 505387, 505858, 509822, 502212, 505756
 
 **A19b - date_of_first_delinquency, charge_off_date** (10 rows)
 
 date_of_first_delinquency falls after charge_off_date, which distorts credit reporting and statute math.
 
-Sample ids: 500179, 503846, 505175, 507998, 503566, 507746
+Sample ids: 506129, 501383, 505432, 505420, 507853, 509423
 
 **A20a - last_payment_date, last_payment_amount** (30 rows)
 
@@ -189,13 +232,13 @@ Accounts showing a last payment when payments.csv holds no payment for them at a
 
 *The single most useful cross-file reconciliation in the set.*
 
-Sample ids: 509987, 507469, 509734, 503990, 502619, 508296
+Sample ids: 503446, 508438, 508462, 500243, 508467, 502404
 
 **A20b - total_paid** (50 rows)
 
 accounts.total_paid does not equal the sum of POSTED payments in payments.csv.
 
-Sample ids: 502831, 501179, 505429, 504023, 501928, 502533
+Sample ids: 509467, 502084, 504827, 502875, 508280, 508631
 
 **A21 - current_balance, placement_balance** (12 rows)
 
@@ -203,19 +246,19 @@ A handful of balance cells carry a dollar sign and thousands separators, so the 
 
 *Whoever loads the file naively will get a type error or silent string sort here.*
 
-Sample ids: 502591, 503682, 501788, 507465, 507215, 508253
+Sample ids: 501765, 507628, 500034, 504221, 504017, 500753
 
 **A22 - status_date, placement_date** (9 rows)
 
 status_date precedes placement_date.
 
-Sample ids: 501911, 508421, 502681, 505596, 508127, 501657
+Sample ids: 508453, 507643, 501019, 509993, 507979, 505780
 
 **A23 - next_action_date, account_status** (40 rows)
 
 Closed accounts still carrying a future next_action_date, so they stay in collector queues.
 
-Sample ids: 503610, 509198, 503460, 506046, 501016, 505172
+Sample ids: 505908, 508026, 508482, 507513, 507609, 505255
 
 **A24 - employer_name, address_line2, middle_initial, phone_work, email** (70 rows)
 
@@ -223,13 +266,13 @@ Empty values written five different ways: blank, NULL, N/A, n/a, -, UNKNOWN, non
 
 *Anything counting nulls will undercount unless these are normalized first.*
 
-Sample ids: 504387, 503330, 509046, 505859, 508075, 507411
+Sample ids: 502902, 500016, 507534, 509833, 501816, 501620
 
 **A25 - state** (6 rows)
 
 Invalid or non-standard state codes.
 
-Sample ids: 500354, 508960, 508432, 507216, 508307, 509471
+Sample ids: 504335, 507757, 509225, 507823, 503487, 506561
 
 **A26 - ssn, last_name** (30 rows)
 
@@ -237,7 +280,7 @@ Not a defect: roughly 30 consumers hold multiple accounts across different clien
 
 *Distinguish these from the true duplicates in A15.*
 
-Sample ids: 503188, 501618, 506493, 508617, 507327, 508370
+Sample ids: 500647, 502453, 500125, 506923, 502117, 501005
 
 **A27 - total_paid, adjustment_amount** (20 rows)
 
@@ -245,7 +288,7 @@ Settlements accepted for less than the client's contractual min_settlement_pct. 
 
 *Easiest to see as payment_arrangements.settlement_pct below clients.min_settlement_pct; otherwise compare total_paid against placement_balance + interest + fees.*
 
-Sample ids: 509674, 501270, 507635, 500759, 505511, 508618
+Sample ids: 509129, 507486, 504712, 507419, 506791, 508493
 
 **A28 - account_status, client_id** (15 rows)
 
@@ -253,7 +296,7 @@ Accounts closed as SETTLED_IN_FULL under clients whose contract sets allows_sett
 
 *Join accounts to clients and check account_status against allows_settlement.*
 
-Sample ids: 506894, 506143, 506922, 506002, 506086, 507160
+Sample ids: 501425, 504932, 506750, 508266, 505327, 500918
 
 **A29 - status_class, account_status** (30 rows)
 
@@ -261,7 +304,15 @@ status_class disagrees with account_status. Most are closed accounts still class
 
 *status_class is a denormalized rollup of account_status. Rebuild it from the status and compare, rather than trusting the stored value.*
 
-Sample ids: 505205, 500743, 503147, 501022, 505322, 501957
+Sample ids: 506003, 509877, 506260, 503079, 505818, 508499
+
+**A30 - client_last_payment_date, placement_date** (40 rows)
+
+The last payment to the original creditor is dated after placement, so the consumer paid the client directly while the agency kept collecting. The agency balance was never reduced.
+
+*Real and expensive: it causes double collection and client disputes. Compare client_last_payment_date against placement_date.*
+
+Sample ids: 504484, 505496, 504743, 503342, 503470, 501650
 
 ### payments
 
@@ -269,7 +320,7 @@ Sample ids: 505205, 500743, 503147, 501022, 505322, 501957
 
 Payments referencing account_ids that are not in accounts.csv.
 
-Sample ids: 9002830, 9006498, 9001227, 9007626, 9006112, 9009804
+Sample ids: 9005521, 9006794, 9001567, 9013193, 9010105, 9001905
 
 **P2 - payment_date** (25 rows)
 
@@ -277,13 +328,13 @@ Payments dated after the account was closed, including payments taken on bankrup
 
 *Join to accounts.closed_date. Some of these are compliance problems, not just data problems.*
 
-Sample ids: 9009929, 9001642, 9013167, 9015025, 9009164, 9001530
+Sample ids: 9000598, 9009559, 9007004, 9009235, 9002014, 9006731
 
 **P3 - payment_amount** (10 rows)
 
 Posted payments with a zero or negative amount.
 
-Sample ids: 9002878, 9014233, 9009126, 9002573, 9004453, 9010504
+Sample ids: 9012454, 9003270, 9007474, 9000344, 9000251, 9011535
 
 **P4 - payment_id, transaction_reference** (15 rows)
 
@@ -291,25 +342,25 @@ Duplicate payment rows: identical account, date, amount and transaction referenc
 
 *Sample values are id pairs. Also inflates total collections if counted naively.*
 
-Sample ids: 9011178/9800000, 9002549/9800001, 9002624/9800002, 9003932/9800003, 9012335/9800004, 9011003/9800005
+Sample ids: 9008762/9800000, 9009451/9800001, 9004885/9800002, 9003724/9800003, 9007492/9800004, 9009173/9800005
 
 **P5 - payment_date** (6 rows)
 
 Payment dates in the future.
 
-Sample ids: 9004883, 9004539, 9012208, 9012500, 9005648, 9013474
+Sample ids: 9012810, 9003083, 9004302, 9007542, 9003329, 9001780
 
 **P6 - received_by_user_id** (20 rows)
 
 Missing or invalid receiving user on the payment.
 
-Sample ids: 9003762, 9011577, 9003708, 9006750, 9004654, 9010168
+Sample ids: 9000334, 9009610, 9002041, 9009906, 9000165, 9010251
 
 **P7 - payment_date, posted_date** (5 rows)
 
 Payments posted before the account was ever placed with the agency.
 
-Sample ids: 9004462, 9005941, 9013421, 9007701, 9000192
+Sample ids: 9010648, 9008950, 9006252, 9010258, 9012633
 
 **P8 - payment_method** (18 rows)
 
@@ -317,7 +368,7 @@ Payment method spelled several different ways for the same method.
 
 *Grouping by payment_method without normalizing splits the same method across buckets.*
 
-Sample ids: 9010076, 9015024, 9006013, 9012387, 9011536, 9004518
+Sample ids: 9011052, 9005581, 9004780, 9013152, 9006936, 9009882
 
 ### payment_arrangements
 
@@ -327,7 +378,7 @@ Arrangements still marked ACTIVE whose next payment was due months ago; they are
 
 *These accounts are also still counted in 'accounts on a plan' reporting.*
 
-Sample ids: 700421, 700907, 700651, 700510, 700661, 701533
+Sample ids: 701016, 702147, 702131, 700609, 700689, 701801
 
 **R2 - arrangement_status** (18 rows)
 
@@ -335,19 +386,19 @@ Active arrangements, with a future payment still scheduled, sitting on accounts 
 
 *Join arrangements to accounts.closed_date.*
 
-Sample ids: 701083, 701877, 700601, 702207, 702301, 700657
+Sample ids: 700906, 701209, 700701, 701892, 701570, 701405
 
 **R3 - installment_amount, number_of_installments, total_amount** (30 rows)
 
 installment_amount times number_of_installments does not reconcile to total_amount.
 
-Sample ids: 702216, 701963, 700343, 700635, 701121, 700938
+Sample ids: 700689, 701015, 700515, 700068, 702017, 700403
 
 **R4 - payments_made, amount_paid_to_date** (12 rows)
 
 Arrangements claiming payments were made when payments.csv has none for that arrangement.
 
-Sample ids: 702186, 700928, 701175, 701849, 702212, 702048
+Sample ids: 701145, 701407, 702047, 701951, 700785, 701452
 
 **R5 - account_id, arrangement_status** (10 rows)
 
@@ -355,13 +406,13 @@ Two simultaneously ACTIVE arrangements on the same account.
 
 *Sample values are account_ids. Group by account_id where status = ACTIVE.*
 
-Sample ids: 503803, 508922, 508423, 506202, 502693, 501436
+Sample ids: 501025, 501168, 500739, 502966, 503081, 500571
 
 **R6 - arrangement_status, broken_date** (8 rows)
 
 broken_date and broken_reason populated while arrangement_status is still ACTIVE.
 
-Sample ids: 700563, 700651, 701070, 700335, 700148, 701681
+Sample ids: 701715, 700935, 700467, 700348, 700565, 701493
 
 ### notes
 
@@ -371,21 +422,21 @@ Notes written by user_id 9999, which does not exist in users.csv.
 
 *Left join notes to users on user_id.*
 
-Sample ids: 500105, 500222, 500690, 501128, 501446, 501477
+Sample ids: 500250, 500591, 501205, 501407, 501501, 501920
 
 **N2 - note_datetime** (25 rows)
 
 Notes dated before the account's placement_date.
 
-Sample ids: 500347, 500420, 501204, 501826, 501884, 502041
+Sample ids: 500420, 501062, 501747, 502374, 502637, 503435
 
-**N3 - note_datetime** (117 rows)
+**N3 - note_datetime** (115 rows)
 
 Outbound call notes timestamped outside 8:00am-9:00pm, an FDCPA calling-window problem.
 
 *Filter contact_type = OUTBOUND_CALL and check the hour part of note_datetime.*
 
-Sample ids: 500083, 500120, 500157, 500240, 500261, 500318
+Sample ids: 500004, 500103, 500254, 500270, 500309, 500498
 
 **N4a - note_text** (35 rows)
 
@@ -393,19 +444,19 @@ Notes documenting a cease and desist request where accounts.cease_desist_flag is
 
 *Search note_text for 'cease and desist' and compare the account flag.*
 
-Sample ids: 500172, 500243, 500406, 500416, 500419, 500803
+Sample ids: 500181, 500861, 501199, 501401, 501454, 501478
 
 **N4b - note_text** (25 rows)
 
 Notes documenting attorney representation where accounts.attorney_represented_flag is still N.
 
-Sample ids: 500057, 500248, 501532, 501564, 501716, 501832
+Sample ids: 500862, 501246, 502474, 503000, 503069, 503529
 
-**N5 - note_text** (47 rows)
+**N5 - note_text** (50 rows)
 
 Exact duplicate notes: same account, timestamp and text under two note_ids.
 
-Sample ids: 500291, 500468, 500800, 500886, 501310, 501418
+Sample ids: 500245, 500488, 500601, 500730, 500768, 500999
 
 **N6 - note_text** (60 rows)
 
@@ -413,13 +464,13 @@ Note text containing embedded newlines, quotes and commas. Correct per RFC 4180 
 
 *notes.csv has far more physical lines than records.*
 
-Sample ids: 500062, 500651, 500717, 500799, 500919, 500945
+Sample ids: 500042, 500062, 500116, 500248, 500574, 500710
 
 **N7 - note_datetime** (30 rows)
 
 Collection calls logged after the account was closed, including bankruptcy and deceased accounts.
 
-Sample ids: 500234, 500565, 500571, 500857, 501260, 502313
+Sample ids: 500369, 500400, 500495, 500645, 500690, 500723
 
 **N8 - note_text** (7 rows)
 
@@ -427,7 +478,7 @@ Third-party disclosure: the balance and creditor were revealed to someone other 
 
 *A compliance issue rather than a structural one.*
 
-Sample ids: 501037, 501848, 502555, 505835, 507641, 508390
+Sample ids: 500538, 500739, 501507, 502700, 503287, 505742
 
 ### clients
 

@@ -6,9 +6,13 @@ that participants in a hands on session can point an AI tool at a realistic oper
 data set and work with it directly, without anyone having to expose real consumer data.
 
 The data looks like a system that has been running for five years, which means it also
-has the flaws of one. Sixty two classes of data quality defect are planted on purpose,
+has the flaws of one. Sixty three classes of data quality defect are planted on purpose,
 catalogued automatically as they are applied, and documented in a facilitator answer
 key. Finding them is the exercise.
+
+Liquidation is not random either. Each account carries a latent propensity to pay built
+from the drivers that matter in real collections, so the data supports building an
+actual scorecard, and two seeds give you a matched train and holdout pair.
 
 Everything is generated. The names, addresses, Social Security numbers, phone numbers,
 email addresses, account numbers and clients are invented, and no row describes a real
@@ -40,11 +44,11 @@ That writes the six CSV files into a `data/` directory next to the script, along
 ```
 clients                      16
 users                        49
-accounts                 10,000   (3,447 closed = 34.5%)
-payments                 15,383
-payment_arrangements      2,400
-notes                   200,115   (20.0 per account)
-planted defects              62
+accounts                 10,000   (3,477 closed = 34.8%)
+payments                 13,339
+payment_arrangements      2,276
+notes                   197,573   (19.8 per account)
+planted defects              63
 ```
 
 The whole run takes a few seconds and produces about 41 MB. To confirm the output is
@@ -92,6 +96,88 @@ Two things to know:
   methods this uses are stable in practice across Python 3.8 through 3.14, so pin a
   Python version too if you need identity across a long time span.
 
+## Propensity to pay
+
+Liquidation in this data is not random. Every account carries a latent propensity drawn
+from a fixed logistic model over the things that actually drive collections performance,
+and that score then decides whether the account pays, how much and how often, what
+status it ends in, how its phone calls go, and what vendor score it carries. The
+result is a data set you can build a real scorecard on.
+
+The drivers, in rough order of strength:
+
+| Driver | Direction |
+| --- | --- |
+| **Debt age at placement**, from charge-off to placement | Newer paper pays. Primary placements are weeks old, tertiary paper is years old |
+| **Placement balance** | Smaller balances pay. The effect is per 10x, not per dollar |
+| **Client last payment** | A consumer who paid the original creditor pays the agency, and the more recently the better |
+| **Contactability** | A cell phone and a verified address help; a bad address hurts. You cannot collect from someone you cannot reach |
+| **Product type** | Small utility and telecom balances liquidate; auto deficiency and student paper does not |
+| **Prior agency payment or promise** | By far the strongest, and partly self fulfilling. See the note on time splits below |
+
+Two things are deliberately kept apart. **Debt age** is how stale the paper was when it
+arrived, and it is a genuine driver. **Time on book** is how long the agency has had it,
+and it only controls for the fact that a freshly placed account has not had time to pay
+yet. Conflating them is the most common way to get this analysis wrong, so the data is
+built to punish it.
+
+The notes carry signal too. A consumer who is going to pay promises and pays; one who is
+not argues. Promise to pay and arrangement notes concentrate among high propensity
+accounts, refusals and disputes among low ones, so a model can read the note text and
+learn something real.
+
+`collectability_score` is a noisy proxy for the latent score, in the way a purchased
+vendor score is. It helps, and it is nowhere near sufficient on its own.
+
+The exact coefficients are printed in `ANSWER_KEY.md` on every run, so you can compare a
+fitted model against the truth.
+
+## Building an A/B pair
+
+Because the coefficients are fixed constants rather than seeded values, two data sets
+built from different seeds share one underlying model and differ only in noise. That
+makes a clean train and holdout pair: learn the pattern on A, prove it on B.
+
+```bash
+python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md
+```
+
+```bash
+python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md
+```
+
+```bash
+python ab_check.py data_a data_b
+```
+
+`ab_check.py` fits a logistic scorecard on A, applies it unchanged to B, and reports AUC
+and decile lift for both. It uses only the standard library. A representative run:
+
+```
+Model fitted on A, applied unchanged to B
+  AUC on A (in sample)     0.7479
+  AUC on B (never seen)    0.7508
+  difference               0.0029
+```
+
+An AUC near 0.75 is deliberate. The model has a noise term precisely so that a perfect
+score is impossible, which is what a real collections scorecard looks like.
+
+The target is any posted payment, taken from `payments.csv` rather than from
+`accounts.total_paid`, because that column is one of the planted defects. Cleaning the
+data is part of the job: dollar signs in balance columns, returned payments that must
+not be counted, and duplicate payment rows all move the numbers if they are ignored.
+
+**On the self fulfilling drivers.** Prior payment and promise to pay predict future
+payment enormously well, and that is exactly the problem: an account that has already
+paid has told you the answer. Use them only with a time split, for example features from
+the first 90 days on book predicting payment after day 90. Watch for censoring when you
+do, since accounts that paid in full closed and cannot pay again.
+
+**A caution worth repeating to participants.** A model trained here learns the pattern
+injected by `generate.py`. It says nothing about real consumers, and the product type
+weights in particular were chosen to be plausible and learnable, not measured.
+
 ## Why this is safe to hand out
 
 The identifiers are not merely made up, they are impossible on purpose:
@@ -118,9 +204,9 @@ Everything below lands in `data/`, which is not tracked in this repository. Run
 | File | Rows | Size | What it holds |
 | --- | ---: | ---: | --- |
 | `data/accounts.csv` | 10,000 | 4.1 MB | One row per placed account, with the consumer's details on the same row |
-| `data/notes.csv` | 200,115 | 35 MB | Collection activity notes, roughly 20 per account |
-| `data/payments.csv` | 15,383 | 2.4 MB | Payment transactions, including returns and reversals |
-| `data/payment_arrangements.csv` | 2,400 | 418 KB | Installment plans and settlement agreements |
+| `data/notes.csv` | 197,573 | 35 MB | Collection activity notes, roughly 20 per account |
+| `data/payments.csv` | 13,339 | 2.1 MB | Payment transactions, including returns and reversals |
+| `data/payment_arrangements.csv` | 2,276 | 390 KB | Installment plans and settlement agreements |
 | `data/clients.csv` | 16 | 3 KB | The creditors that place accounts with the agency |
 | `data/users.csv` | 49 | 6 KB | Agency staff, from collectors to compliance |
 
@@ -224,10 +310,12 @@ mind before trusting it.
 | `interest_rate_pct` | Annual rate applied post placement, zero where none applies |
 | `last_payment_date` | Date of the most recent posted payment |
 | `last_payment_amount` | Amount of that payment |
+| `client_last_payment_date` | Last payment the consumer made to the original creditor, before placement. Blank if they never paid the creditor |
+| `client_last_payment_amount` | Amount of that payment |
 | `assigned_user_id` | Collector who owns the account, joins to `users.csv` |
 | `last_worked_date` | Last date any collector touched the account |
 | `next_action_date` | Date the account is queued to be worked again |
-| `collectability_score` | Internal score from 1 to 99, higher means more likely to pay |
+| `collectability_score` | Vendor score from 1 to 99, higher means more likely to pay. Useful but noisy, like the real thing |
 | `credit_reported_flag` | Whether the agency reports this account to the bureaus |
 | `created_timestamp` | When the account row was created |
 | `last_updated_timestamp` | When the account row last changed |
@@ -372,6 +460,7 @@ A handful of fields are dependable. Every account has an `account_id`,
 | `generate.py` | The generator. Builds every file and writes the answer key |
 | `refdata.py` | Name, street and city pools, plus real US city, state and ZIP combinations |
 | `validate.py` | Sanity checks over whatever was generated |
+| `ab_check.py` | Fits a liquidation scorecard on one data set and tests it on another |
 | `ANSWER_KEY.md` | Facilitator key, written by the generator on every run |
 | `data/` | Generated output, not tracked here |
 
