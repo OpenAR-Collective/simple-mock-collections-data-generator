@@ -1,0 +1,14 @@
+# Generated output. Run "python generate.py" to produce these locally.
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
