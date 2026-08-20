@@ -40,10 +40,10 @@ That writes the six CSV files into a `data/` directory next to the script, along
 ```
 clients                      16
 users                        49
-accounts                 10,000   (3,433 closed = 34.3%)
-payments                 16,002
-payment_arrangements      2,539
-notes                   199,966   (20.0 per account)
+accounts                 10,000   (3,447 closed = 34.5%)
+payments                 15,383
+payment_arrangements      2,400
+notes                   200,115   (20.0 per account)
 planted defects              62
 ```
 
@@ -63,7 +63,7 @@ The constants at the top of `generate.py` control the shape of the data set:
 
 | Constant | Default | Effect |
 | --- | --- | --- |
-| `SEED` | `20260820` | Any integer or string. Change it for a completely different but equally valid data set |
+| `SEED` | `"Sample Seed"` | Any text, or any integer. Change it for a completely different but equally valid data set |
 | `ACCOUNT_COUNT` | `10_000` | Number of accounts, which drives every other file |
 | `TODAY` | `2026-08-20` | The "now" every date in the set is relative to |
 | `HISTORY_START` | `TODAY` minus 1,826 days | How far back placements go, five years by default |
@@ -78,10 +78,10 @@ Two people who run the same commit with the same `SEED` get byte identical files
 is verified rather than assumed: generating twice in separate processes produces the
 same SHA-256 for all six CSVs and for the answer key.
 
-`SEED` accepts any integer or string, so `SEED = "spring-workshop-2026"` works as well
-as a number. Python derives the seed from a SHA-512 of the string rather than from
-`hash()`, so a string seed gives the same result on every machine and is unaffected by
-`PYTHONHASHSEED`.
+The default seed is the text `"Sample Seed"`. Any text works, as does any integer, so
+`SEED = "spring-workshop-2026"` is fine. Python derives a text seed from a SHA-512 of
+the characters rather than from `hash()`, so it gives the same result on every machine
+and is unaffected by `PYTHONHASHSEED`.
 
 Two things to know:
 
@@ -118,9 +118,9 @@ Everything below lands in `data/`, which is not tracked in this repository. Run
 | File | Rows | Size | What it holds |
 | --- | ---: | ---: | --- |
 | `data/accounts.csv` | 10,000 | 4.1 MB | One row per placed account, with the consumer's details on the same row |
-| `data/notes.csv` | 199,966 | 35 MB | Collection activity notes, roughly 20 per account |
-| `data/payments.csv` | 16,002 | 2.4 MB | Payment transactions, including returns and reversals |
-| `data/payment_arrangements.csv` | 2,539 | 418 KB | Installment plans and settlement agreements |
+| `data/notes.csv` | 200,115 | 35 MB | Collection activity notes, roughly 20 per account |
+| `data/payments.csv` | 15,383 | 2.4 MB | Payment transactions, including returns and reversals |
+| `data/payment_arrangements.csv` | 2,400 | 418 KB | Installment plans and settlement agreements |
 | `data/clients.csv` | 16 | 3 KB | The creditors that place accounts with the agency |
 | `data/users.csv` | 49 | 6 KB | Agency staff, from collectors to compliance |
 
