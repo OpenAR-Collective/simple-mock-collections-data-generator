@@ -63,7 +63,7 @@ The constants at the top of `generate.py` control the shape of the data set:
 
 | Constant | Default | Effect |
 | --- | --- | --- |
-| `SEED` | `20260820` | Change it for a completely different but equally valid data set |
+| `SEED` | `20260820` | Any integer or string. Change it for a completely different but equally valid data set |
 | `ACCOUNT_COUNT` | `10_000` | Number of accounts, which drives every other file |
 | `TODAY` | `2026-08-20` | The "now" every date in the set is relative to |
 | `HISTORY_START` | `TODAY` minus 1,826 days | How far back placements go, five years by default |
@@ -71,6 +71,26 @@ The constants at the top of `generate.py` control the shape of the data set:
 
 Volumes scale roughly linearly, so `ACCOUNT_COUNT = 500` gives a set small enough to
 open in a spreadsheet.
+
+### Reproducibility
+
+Two people who run the same commit with the same `SEED` get byte identical files. That
+is verified rather than assumed: generating twice in separate processes produces the
+same SHA-256 for all six CSVs and for the answer key.
+
+`SEED` accepts any integer or string, so `SEED = "spring-workshop-2026"` works as well
+as a number. Python derives the seed from a SHA-512 of the string rather than from
+`hash()`, so a string seed gives the same result on every machine and is unaffected by
+`PYTHONHASHSEED`.
+
+Two things to know:
+
+- The code version is part of the seed in practice. Any edit that adds or removes a
+  random draw shifts every draw after it, so the same seed on a different commit gives a
+  different but equally valid data set. Pin the commit, not just the seed.
+- Python guarantees the core `random()` stream is stable across releases. The helper
+  methods this uses are stable in practice across Python 3.8 through 3.14, so pin a
+  Python version too if you need identity across a long time span.
 
 ## Why this is safe to hand out
 

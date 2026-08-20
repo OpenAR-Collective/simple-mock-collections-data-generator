@@ -30,6 +30,8 @@ from refdata import (AREA_CODES, BK_DISTRICTS, CITIES, EMAIL_DOMAINS, EMPLOYERS,
                      FIRST_NAMES_F, FIRST_NAMES_M, LAST_NAMES, MIDDLE_INITIALS,
                      STREET_NAMES, STREET_TYPES, SUFFIXES, UNIT_TYPES)
 
+# Any integer, string or bytes value. Python derives the seed from a SHA-512 of a
+# string rather than from hash(), so string seeds are stable across machines.
 SEED = 20260820
 ACCOUNT_COUNT = 10_000
 TODAY = date(2026, 8, 20)                         # "now" for the whole data set
