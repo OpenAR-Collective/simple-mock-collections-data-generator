@@ -29,7 +29,18 @@ If you just want the data, take the archive. Nothing to install, nothing to run.
 | Download | Size | What is in it |
 | --- | ---: | --- |
 | [Data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data.zip) | 6.9 MB | 10,000 accounts and all six CSV files, plus this data dictionary |
-| [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 23 KB | Every planted defect and the true propensity coefficients. Separate on purpose, so the data can be handed over without the answers |
+| [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 23 KB | Every planted defect in that set and the true propensity coefficients |
+| [Second data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data-2.zip) | 6.9 MB | An independent second set, same shape and same underlying model |
+| [Second answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY-2.md) | 23 KB | The matching catalog for the second set |
+
+Two data sets are published because they share one underlying propensity model and differ
+only in noise. That makes them a ready made train and holdout pair: fit a scorecard on one,
+test it honestly on the other. They are equally useful as simply a second set when you need
+one, for comparing two pipeline versions or two configurations against identical structure.
+
+The answer keys are separate downloads on purpose, so the data can be handed to someone
+without the answers. Each key belongs to its own set. The record ids in one do not refer
+to anything in the other.
 
 Those links always resolve to the newest release. Older releases stay downloadable on the
 [releases page](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases),
