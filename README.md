@@ -28,8 +28,7 @@ If you just want the data, take the archive. Nothing to install, nothing to run.
 
 | Download | Size | What is in it |
 | --- | ---: | --- |
-| [Full data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data.zip) | 6.9 MB | 10,000 accounts and all six CSV files, plus this data dictionary |
-| [Sample](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-sample.zip) | 0.4 MB | 500 accounts, same shape, for a look at the schema without the full download |
+| [Data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data.zip) | 6.9 MB | 10,000 accounts and all six CSV files, plus this data dictionary |
 | [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 23 KB | Every planted defect and the true propensity coefficients. Separate on purpose, so the data can be handed over without the answers |
 
 Those links always resolve to the newest release. Older releases stay downloadable on the

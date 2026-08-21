@@ -9,8 +9,7 @@ assets, which are stored outside the repository.
 Usage:  python package.py
 
 Produces dist/:
-    acme-collections-data.zip     full 10,000 account set plus the data dictionary
-    acme-collections-sample.zip   500 account set, same shape, for a quick look
+    acme-collections-data.zip     the data set plus the data dictionary
     ANSWER_KEY.md                 defect catalog and true propensity coefficients,
                                   kept separate so the data can be handed over
                                   without the answers
@@ -27,8 +26,6 @@ import zipfile
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(BASE_DIR, "dist")
-SAMPLE_DIR = os.path.join(BASE_DIR, "data_sample")
-SAMPLE_ACCOUNTS = 500
 
 # Pinned so the zip is byte-identical across rebuilds. Matches TODAY in generate.py.
 ZIP_TIMESTAMP = (2026, 8, 20, 0, 0, 0)
@@ -57,29 +54,21 @@ def build_zip(path, members):
 def main():
     os.makedirs(DIST_DIR, exist_ok=True)
 
-    print("generating the full data set")
+    print("generating the data set")
     run()
-    print(f"generating the {SAMPLE_ACCOUNTS} account sample")
-    run("--accounts", str(SAMPLE_ACCOUNTS), "--out", os.path.basename(SAMPLE_DIR),
-        "--key", os.path.join(os.path.basename(SAMPLE_DIR), "ANSWER_KEY.md"))
 
-    readme = os.path.join(BASE_DIR, "README.md")
-    full = [(os.path.join(BASE_DIR, "data", f), f) for f in CSV_FILES]
-    full.append((readme, "README.md"))
-    sample = [(os.path.join(SAMPLE_DIR, f), f) for f in CSV_FILES]
-    sample.append((readme, "README.md"))
+    members = [(os.path.join(BASE_DIR, "data", f), f) for f in CSV_FILES]
+    members.append((os.path.join(BASE_DIR, "README.md"), "README.md"))
 
     print()
-    for name, members in (("acme-collections-data.zip", full),
-                          ("acme-collections-sample.zip", sample)):
-        size = build_zip(os.path.join(DIST_DIR, name), members)
-        print(f"  {name:32} {size / 1e6:6.2f} MB")
+    name = "acme-collections-data.zip"
+    size = build_zip(os.path.join(DIST_DIR, name), members)
+    print(f"  {name:32} {size / 1e6:6.2f} MB")
 
     shutil.copyfile(os.path.join(BASE_DIR, "ANSWER_KEY.md"),
                     os.path.join(DIST_DIR, "ANSWER_KEY.md"))
     print(f"  {'ANSWER_KEY.md':32} {os.path.getsize(os.path.join(DIST_DIR, 'ANSWER_KEY.md')) / 1e3:6.1f} KB")
 
-    shutil.rmtree(SAMPLE_DIR, ignore_errors=True)
     print(f"\nwrote {os.path.relpath(DIST_DIR, BASE_DIR)}/")
 
 
