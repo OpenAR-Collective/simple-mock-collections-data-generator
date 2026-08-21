@@ -9,8 +9,9 @@ pointing an AI tool at an operational data set to see how it copes.
 
 The data looks like a system that has been running for five years, which means it also
 has the flaws of one. Sixty four classes of data quality defect are planted on purpose,
-catalogued automatically as they are applied and written to a generated answer key. That is deliberate. Data that is too clean tells you nothing about whether your
-pipeline, your report or your model survives contact with production.
+catalogued automatically as they are applied and written to a generated answer key.
+That is deliberate. Data that is too clean tells you nothing about whether your pipeline,
+your report or your model survives contact with production.
 
 Liquidation is not random either. Each account carries a latent propensity to pay built
 from the drivers that matter in real collections, so the data supports building an
@@ -20,6 +21,24 @@ holdout pair.
 Everything is generated. The names, addresses, Social Security numbers, phone numbers,
 email addresses, account numbers and clients are invented, and no row describes a real
 person or a real debt.
+
+## Download it, or generate it
+
+If you just want the data, take the archive. Nothing to install, nothing to run.
+
+| Download | Size | What is in it |
+| --- | ---: | --- |
+| [Full data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data.zip) | 6.9 MB | 10,000 accounts and all six CSV files, plus this data dictionary |
+| [Sample](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-sample.zip) | 0.4 MB | 500 accounts, same shape, for a look at the schema without the full download |
+| [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 23 KB | Every planted defect and the true propensity coefficients. Separate on purpose, so the data can be handed over without the answers |
+
+Those links always resolve to the newest release. Older releases stay downloadable on the
+[releases page](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases),
+which matters because regenerating produces a different, equally valid data set: if you
+built something against a particular release, that exact file is still there.
+
+Generate it yourself instead if you want a different size, a different seed, or a matched
+pair of data sets to train and test a model on.
 
 ## Quick start
 
@@ -503,6 +522,7 @@ A handful of fields are dependable. Every account has an `account_id`,
 | `generate.py` | The generator. Builds every file and writes the answer key |
 | `refdata.py` | Name, street and city pools, plus real US city, state and ZIP combinations |
 | `validate.py` | Sanity checks over whatever was generated |
+| `package.py` | Builds the release archives into `dist/`, not tracked |
 | `ab_check.py` | Fits a liquidation scorecard on one data set and tests it on another |
 | `ANSWER_KEY.md` | Defect catalog and true model coefficients, written on every run, not tracked |
 | `data/` | Generated output, not tracked here |

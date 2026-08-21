@@ -4,6 +4,10 @@ data_*/
 *.csv
 # Answer keys are regenerated on every run, so tracking them is pure churn.
 ANSWER_KEY*.md
+# Release archives, built by package.py and attached to a GitHub Release. A zip
+# cannot be delta compressed, so committing one adds a full copy to history
+# on every rebuild.
+dist/
 
 # Python
 __pycache__/
