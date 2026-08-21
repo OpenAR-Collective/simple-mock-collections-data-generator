@@ -123,25 +123,86 @@ def business_dt(d, early=8, late=20):
 # Clients
 # --------------------------------------------------------------------------
 
+# Creditors that place accounts with the agency.
+#
+# "lift" is the client's own contribution to liquidation in log-odds, on top of
+# what the debt is for. It stands in for the things that genuinely vary between
+# creditors: how clean the data they send is, how hard they worked the account
+# before placing it, and who their customers are. Clients inside the same product
+# class deliberately differ, so client and product type are separate signals.
+#
+# A few clients place more than one kind of paper, which is what makes client and
+# product type separable at all rather than perfectly collinear.
 CLIENT_SPECS = [
-    # name, industry, product, acct# prefix, acct# digits, contingency, interest, fee, weight
-    ("Mercy Regional Health System", "Healthcare", "MEDICAL", "MRH", 9, 22.5, False, False, 14),
-    ("Northside Family Practice PLLC", "Healthcare", "MEDICAL", "NFP", 7, 28.0, False, False, 6),
-    ("Summit Peak Bank, N.A.", "Banking", "CREDIT_CARD", "", 12, 30.0, True, False, 12),
-    ("Cardinal Financial Services", "Consumer Lending", "PERSONAL_LOAN", "CFS-", 8, 32.5, True, False, 8),
-    ("Riverbend Credit Union", "Banking", "AUTO_DEFICIENCY", "RB", 10, 27.0, True, False, 5),
-    ("Metro Utilities Authority", "Utilities", "UTILITY", "", 11, 18.0, False, True, 9),
-    ("Clearwave Communications", "Telecom", "TELECOM", "CW", 12, 24.0, False, True, 8),
-    ("Apex Property Management", "Property Management", "RENTAL", "APM", 6, 35.0, False, True, 4),
-    ("Silverline Auto Finance", "Auto Finance", "AUTO_DEFICIENCY", "SL", 10, 29.0, True, False, 5),
-    ("Pinnacle Dental Group", "Healthcare", "DENTAL", "PDG", 7, 30.0, False, False, 4),
-    ("Greenfield Student Aid Servicing", "Education Finance", "STUDENT_LOAN", "GSA", 11, 26.0, True, False, 3),
-    ("Titan Fitness Clubs", "Fitness", "GYM_MEMBERSHIP", "TFC", 6, 40.0, False, True, 6),
-    ("Harbor Point Veterinary", "Veterinary", "VETERINARY", "HPV", 6, 33.0, False, False, 3),
-    ("Sunbelt Retail Card Services", "Retail Credit", "RETAIL_CARD", "SB", 12, 31.0, True, False, 7),
-    ("Lakeshore Insurance Recovery", "Insurance", "SUBROGATION", "LIR", 9, 25.0, False, False, 3),
-    # Near-duplicate of client 1, planted on purpose.
-    ("Mercy Regional Health Sys.", "Healthcare", "MEDICAL", "MRH", 9, 22.5, False, False, 3),
+    {"name": "Mercy Regional Health System", "industry": "Healthcare", "prefix": "MRH",
+     "digits": 9, "rate": 22.5, "weight": 12, "lift": 0.18,
+     "products": [("MEDICAL", 1.0)]},
+    {"name": "Northside Family Practice PLLC", "industry": "Healthcare", "prefix": "NFP",
+     "digits": 7, "rate": 28.0, "weight": 5, "lift": -0.12, "no_settlement": True,
+     "products": [("MEDICAL", 1.0)]},
+    {"name": "Cascade Valley Medical Center", "industry": "Healthcare", "prefix": "CVM",
+     "digits": 10, "rate": 24.0, "weight": 6, "lift": 0.02,
+     "products": [("MEDICAL", 1.0)]},
+    {"name": "Pinnacle Dental Group", "industry": "Healthcare", "prefix": "PDG",
+     "digits": 7, "rate": 30.0, "weight": 4, "lift": 0.10,
+     "products": [("DENTAL", 1.0)]},
+    {"name": "Brightline Dental Partners", "industry": "Healthcare", "prefix": "BDP",
+     "digits": 8, "rate": 31.0, "weight": 3, "lift": -0.14, "no_email": True,
+     "products": [("DENTAL", 1.0)]},
+    {"name": "Summit Peak Bank, N.A.", "industry": "Banking", "prefix": "",
+     "digits": 12, "rate": 30.0, "weight": 12, "lift": 0.12, "interest": True,
+     "products": [("CREDIT_CARD", 0.75), ("PERSONAL_LOAN", 0.25)]},
+    {"name": "Granite State Bankcard", "industry": "Banking", "prefix": "GSB",
+     "digits": 11, "rate": 29.5, "weight": 7, "lift": -0.16, "interest": True,
+     "products": [("CREDIT_CARD", 1.0)]},
+    {"name": "Sunbelt Retail Card Services", "industry": "Retail Credit", "prefix": "SB",
+     "digits": 12, "rate": 31.0, "weight": 7, "lift": 0.06, "interest": True,
+     "products": [("RETAIL_CARD", 0.8), ("CREDIT_CARD", 0.2)]},
+    {"name": "Cardinal Financial Services", "industry": "Consumer Lending", "prefix": "CFS-",
+     "digits": 8, "rate": 32.5, "weight": 8, "lift": -0.08, "interest": True,
+     "products": [("PERSONAL_LOAN", 0.7), ("RETAIL_CARD", 0.3)]},
+    {"name": "Riverbend Credit Union", "industry": "Banking", "prefix": "RB",
+     "digits": 10, "rate": 27.0, "weight": 5, "lift": 0.22, "interest": True,
+     "products": [("AUTO_DEFICIENCY", 1.0)]},
+    {"name": "Silverline Auto Finance", "industry": "Auto Finance", "prefix": "SL",
+     "digits": 10, "rate": 29.0, "weight": 5, "lift": -0.20, "interest": True,
+     "products": [("AUTO_DEFICIENCY", 1.0)]},
+    {"name": "Metro Utilities Authority", "industry": "Utilities", "prefix": "",
+     "digits": 11, "rate": 18.0, "weight": 9, "lift": 0.14, "fee": True,
+     "products": [("UTILITY", 1.0)]},
+    {"name": "Ridgeline Power & Water", "industry": "Utilities", "prefix": "RPW",
+     "digits": 9, "rate": 19.5, "weight": 5, "lift": -0.10, "fee": True,
+     "products": [("UTILITY", 1.0)]},
+    {"name": "Clearwave Communications", "industry": "Telecom", "prefix": "CW",
+     "digits": 12, "rate": 24.0, "weight": 8, "lift": -0.06, "fee": True, "dob_us_format": True,
+     "products": [("TELECOM", 1.0)]},
+    {"name": "Northstar Wireless", "industry": "Telecom", "prefix": "NSW",
+     "digits": 10, "rate": 25.5, "weight": 5, "lift": 0.16, "fee": True,
+     "products": [("TELECOM", 1.0)]},
+    {"name": "Apex Property Management", "industry": "Property Management", "prefix": "APM",
+     "digits": 6, "rate": 35.0, "weight": 4, "lift": -0.18, "fee": True,
+     "products": [("RENTAL", 1.0)]},
+    {"name": "Cornerstone Residential Group", "industry": "Property Management", "prefix": "CRG",
+     "digits": 8, "rate": 34.0, "weight": 3, "lift": 0.08, "fee": True,
+     "products": [("RENTAL", 1.0)]},
+    {"name": "Greenfield Student Aid Servicing", "industry": "Education Finance", "prefix": "GSA",
+     "digits": 11, "rate": 26.0, "weight": 3, "lift": 0.00, "interest": True,
+     "products": [("STUDENT_LOAN", 1.0)]},
+    {"name": "Titan Fitness Clubs", "industry": "Fitness", "prefix": "TFC",
+     "digits": 6, "rate": 40.0, "weight": 6, "lift": -0.05, "fee": True,
+     "lapsed": True, "inactive": True, "products": [("GYM_MEMBERSHIP", 1.0)]},
+    {"name": "Harbor Point Veterinary", "industry": "Veterinary", "prefix": "HPV",
+     "digits": 6, "rate": 33.0, "weight": 3, "lift": 0.05,
+     "products": [("VETERINARY", 1.0)]},
+    {"name": "Lakeshore Insurance Recovery", "industry": "Insurance", "prefix": "LIR",
+     "digits": 9, "rate": 25.0, "weight": 3, "lift": 0.00, "no_settlement": True,
+     "products": [("SUBROGATION", 1.0)]},
+    # A second client code for Mercy Regional. Agencies carry these routinely, for
+    # separate facilities, contract revisions or billing systems, and they share the
+    # same underlying client, so this record carries the same lift as the first one.
+    {"name": "Mercy Regional Health Sys.", "industry": "Healthcare", "prefix": "MRH",
+     "digits": 9, "rate": 22.5, "weight": 3, "lift": 0.18, "inactive": True,
+     "products": [("MEDICAL", 1.0)]},
 ]
 
 PHONE_FORMATS = ["###-###-####", "(###) ###-####", "##########", "###.###.####"]
@@ -149,52 +210,67 @@ PHONE_FORMATS = ["###-###-####", "(###) ###-####", "##########", "###.###.####"]
 
 def build_clients():
     clients = []
-    for i, (name, industry, product, prefix, digits, rate, interest, fee, weight) in enumerate(CLIENT_SPECS, start=1):
+    lapsed_id = dup_ids = no_email_id = None
+    for i, spec in enumerate(CLIENT_SPECS, start=1):
+        client_id = 100 + i
+        name, prefix = spec["name"], spec["prefix"]
+        interest, fee = spec.get("interest", False), spec.get("fee", False)
         city, state, zip5 = pick(CITIES)
         # Every contract predates the placement window, so the only contract-window
         # problem in the data is the deliberate one below.
         start = rand_date(date(2015, 1, 1), HISTORY_START - timedelta(days=30))
         # One client's contract has lapsed but placements keep arriving (defect C2).
-        end = date(2025, 3, 31) if i == 12 else TODAY + timedelta(days=rnd.randint(200, 1800))
+        if spec.get("lapsed"):
+            end = date(2025, 3, 31)
+            lapsed_id = client_id
+        else:
+            end = TODAY + timedelta(days=rnd.randint(200, 1800))
+        if spec.get("no_email"):
+            no_email_id = client_id
         contact_first = pick(FIRST_NAMES_F + FIRST_NAMES_M)
         contact_last = pick(LAST_NAMES)
+        # The product listed on the client record is the one they place most of.
+        primary = max(spec["products"], key=lambda p: p[1])[0]
         clients.append({
-            "client_id": 100 + i,
+            "client_id": client_id,
             "client_code": (prefix.strip("-") or name[:3].upper())[:4].upper() + str(i).zfill(2),
             "client_name": name,
-            "industry": industry,
-            "primary_product_type": product,
+            "industry": spec["industry"],
+            "primary_product_type": primary,
             "contact_name": f"{contact_first} {contact_last}",
-            "contact_email": f"{contact_first[0].lower()}{contact_last.lower()}@{name.split()[0].lower()}.com",
+            "contact_email": ("" if spec.get("no_email") else
+                              f"{contact_first[0].lower()}{contact_last.lower()}"
+                              f"@{name.split()[0].lower().strip(',')}.com"),
             "contact_phone": f"{pick(AREA_CODES[state])}-555-{make_line_number():04d}",
             "address_line1": f"{rnd.randint(100, 8999)} {pick(STREET_NAMES)} {pick(STREET_TYPES)}",
             "city": city, "state": state, "zip_code": zip5,
             "contract_start_date": iso(start),
             "contract_end_date": iso(end),
-            "contingency_rate_pct": f"{rate:.1f}",
+            "contingency_rate_pct": f"{spec['rate']:.1f}",
             "allows_interest": "Y" if interest else "N",
             "interest_rate_pct": f"{rnd.choice([6.0, 8.0, 9.5, 12.0]):.1f}" if interest else "0.0",
             "allows_fees": "Y" if fee else "N",
-            # Two clients forbid settlements outright; the rest set a floor.
-            "allows_settlement": "N" if i in (2, 15) else "Y",
+            "allows_settlement": "N" if spec.get("no_settlement") else "Y",
             "min_settlement_pct": str(rnd.choice([50, 55, 60, 65, 70])),
-            "client_status": "ACTIVE" if i not in (12, 16) else "INACTIVE",
-            "_prefix": prefix, "_digits": digits, "_product": product,
-            "_interest": interest, "_fee": fee, "_weight": weight,
+            "client_status": "INACTIVE" if spec.get("inactive") else "ACTIVE",
+            "_prefix": prefix, "_digits": spec["digits"], "_products": spec["products"],
+            "_interest": interest, "_fee": fee, "_weight": spec["weight"],
+            "_lift": spec["lift"],
             "_phone_format": PHONE_FORMATS[i % len(PHONE_FORMATS)],
             "_ssn_dashes": i % 3 != 0,
-            "_dob_us_format": i == 7,          # one source system exports MM/DD/YYYY
+            "_dob_us_format": bool(spec.get("dob_us_format")),
         })
-    # Defect C3: a client is missing its contact email.
-    clients[9]["contact_email"] = ""
+    dup_ids = [c["client_id"] for c in clients if c["client_name"].startswith("Mercy Regional")]
     record("C1", "clients", "client_name",
-           "Near-duplicate client records for the same creditor (Mercy Regional Health System / "
-           "Mercy Regional Health Sys.), with accounts split across both client_ids.",
-           [101, 116], "Compare account counts and balances by client_name.")
+           "Two client codes for the same creditor, Mercy Regional Health System. Agencies carry "
+           "these routinely, for separate facilities, contract revisions or billing systems, so it "
+           "is not an error. It still splits any report that groups by client_id, and the two "
+           "records liquidate identically because they are the same client.",
+           dup_ids, "Compare account counts, balances and liquidation by client_name against client_id.")
     record("C2", "clients", "contract_end_date",
            "Client contract ended 2025-03-31 but accounts were placed under it afterward.",
-           [111], "Join accounts.placement_date against clients.contract_end_date.")
-    record("C3", "clients", "contact_email", "Client record missing a contact email.", [110])
+           [lapsed_id], "Join accounts.placement_date against clients.contract_end_date.")
+    record("C3", "clients", "contact_email", "Client record missing a contact email.", [no_email_id])
     return clients
 
 
@@ -407,10 +483,21 @@ W_DEBT_AGE = -0.55            # per year between charge-off and placement
 W_LOG_BALANCE = -0.52         # per 10x of placement balance above a $250 base
 W_CLIENT_PAID = 0.75          # the consumer paid the original creditor at some point
 W_CLIENT_PAID_RECENCY = 0.60  # and how recently, decaying to nothing over two years
-W_HAS_CELL = 0.35             # contactability: you cannot collect from someone you cannot reach
-W_HAS_HOME = 0.15
-W_ADDRESS_GOOD = 0.25
-W_ADDRESS_BAD = -0.40
+
+# Contact data. The agency has done no skip tracing or address cleanup of its own,
+# so these fields are exactly what the client sent, which makes them a real signal
+# rather than an artifact of the agency's own record keeping. Collectively this is
+# the strongest family in the model: you cannot collect from someone you cannot reach.
+W_HAS_CELL = 0.35             # a mobile number on file
+W_HAS_HOME = 0.15             # a landline on file
+W_NO_PHONE = -0.35            # no phone number of any kind was provided
+W_PHONE_GOOD = 0.20           # client says the number was good at last contact
+W_PHONE_BAD = -0.50           # known bad, disconnected or wrong number
+W_ADDRESS_GOOD = 0.25         # client says the address was good
+W_ADDRESS_BAD = -0.40         # known bad, mail already returned
+W_NO_ADDRESS = -0.45          # no address was provided at all
+W_CLIENT_LIFT = 1.00          # scale on each client's own lift, from CLIENT_SPECS
+
 PROPENSITY_NOISE_SD = 0.85    # keeps the ceiling realistic; a perfect model is not possible
 
 # Residual effect of what the debt is for, once balance is already accounted for.
@@ -441,8 +528,11 @@ def exposure(days_on_book):
     return 1.0 - math.exp(-max(0, days_on_book) / LIQUIDATION_TIME_CONSTANT_DAYS)
 
 
-def propensity(debt_age_days, balance, client_paid_days_ago, product,
-               has_cell, has_home, address_status):
+PHONE_BAD_STATUSES = ("BAD", "DISCONNECTED", "WRONG_NUMBER")
+
+
+def propensity(debt_age_days, balance, client_paid_days_ago, product, client_lift,
+               has_cell, has_home, phone_status, address_status):
     """Latent probability that this account ever pays anything."""
     z = PROPENSITY_INTERCEPT
     z += W_DEBT_AGE * (debt_age_days / 365.25)
@@ -451,14 +541,39 @@ def propensity(debt_age_days, balance, client_paid_days_ago, product,
         z += W_CLIENT_PAID
         z += W_CLIENT_PAID_RECENCY * max(0.0, 1.0 - client_paid_days_ago / 730.0)
     z += PRODUCT_PROPENSITY.get(product, 0.0)
+    z += W_CLIENT_LIFT * client_lift
+
+    # Phones
     z += W_HAS_CELL * has_cell + W_HAS_HOME * has_home
-    if address_status == "VERIFIED":
+    if phone_status == "NONE":
+        z += W_NO_PHONE
+    elif phone_status in PHONE_BAD_STATUSES:
+        z += W_PHONE_BAD
+    elif phone_status == "VERIFIED":
+        z += W_PHONE_GOOD
+
+    # Address
+    if address_status == "NONE":
+        z += W_NO_ADDRESS
+    elif address_status == "VERIFIED":
         z += W_ADDRESS_GOOD
     elif address_status == "BAD":
         z += W_ADDRESS_BAD
+
     z += rnd.gauss(0.0, PROPENSITY_NOISE_SD)
     return sigmoid(z)
 
+
+# What happens when you dial, given what the client told you about the number.
+# Multipliers on the base dial-result weights; anything unlisted stays at 1.0.
+PHONE_STATUS_DIAL_TILT = {
+    "VERIFIED": {"RPC": 1.6, "NO_ANSWER": 0.8, "DISCONNECTED": 0.15, "WRONG_NUMBER": 0.20},
+    "UNVERIFIED": {},
+    "BAD": {"RPC": 0.35, "NO_ANSWER": 1.3, "DISCONNECTED": 3.0, "WRONG_NUMBER": 2.0},
+    "DISCONNECTED": {"RPC": 0.10, "NO_ANSWER": 0.7, "DISCONNECTED": 8.0, "WRONG_NUMBER": 1.0},
+    "WRONG_NUMBER": {"RPC": 0.10, "NO_ANSWER": 0.7, "DISCONNECTED": 1.0, "WRONG_NUMBER": 8.0},
+    "NONE": {},
+}
 
 # How a right party contact tends to go, relative to a propensity of 0.30.
 # A consumer who is going to pay promises and pays; one who is not argues.
@@ -478,12 +593,12 @@ ACCOUNT_COLUMNS = [
     "last_payment_date", "last_payment_amount",
     "client_last_payment_date", "client_last_payment_amount",
     # Work management
-    "assigned_user_id", "last_worked_date", "next_action_date", "collectability_score",
+    "assigned_user_id", "last_worked_date", "next_action_date",
     "credit_reported_flag", "created_timestamp", "last_updated_timestamp",
     # Consumer (flattened onto the account row)
     "first_name", "middle_initial", "last_name", "name_suffix", "ssn", "date_of_birth",
     "address_line1", "address_line2", "city", "state", "zip_code", "address_status",
-    "phone_home", "phone_cell", "phone_work", "email", "employer_name",
+    "phone_home", "phone_cell", "phone_work", "phone_status", "email", "employer_name",
     # Compliance flags
     "do_not_call_flag", "cease_desist_flag", "attorney_represented_flag", "attorney_name",
     "dispute_flag", "dispute_date",
@@ -501,7 +616,7 @@ def build_accounts(clients, users):
     for n in range(ACCOUNT_COUNT):
         acct_id = 500001 + n
         client = weighted(client_pool)
-        product = client["_product"]
+        product = weighted(client["_products"])
 
         # Placements skew toward the recent past; volume has grown over 5 years.
         age_days = int(1826 * (rnd.random() ** 1.35))
@@ -530,10 +645,42 @@ def build_accounts(clients, users):
         dob = rand_date(date(1945, 1, 1), date(2005, 12, 31))
         dob_str = dob.strftime("%m/%d/%Y") if client["_dob_us_format"] else iso(dob)
         consumer_age = (TODAY - dob).days / 365.25
-        address_status = weighted([("VERIFIED", 0.62), ("UNVERIFIED", 0.27), ("BAD", 0.11)])
+
+        # Contact data exactly as the client sent it. Nothing has been skip traced or
+        # cleaned up, so a missing or bad address here means the agency genuinely
+        # cannot reach this consumer, and the model treats it that way.
+        state_out = state
+        address_status = weighted([("VERIFIED", 0.55), ("UNVERIFIED", 0.26),
+                                   ("BAD", 0.12), ("NONE", 0.07)])
+        if address_status == "NONE":
+            # Clients express "we have no address" in several different ways.
+            shape = weighted([("blank", 0.42), ("literal", 0.24), ("city_only", 0.16),
+                              ("po_box", 0.10), ("no_state", 0.08)])
+            if shape == "blank":
+                line1 = line2 = ""
+                city, zip5 = "", ""
+            elif shape == "literal":
+                line1 = pick(["UNKNOWN", "ADDRESS UNKNOWN", "NO ADDRESS ON FILE", "."])
+                line2 = ""
+            elif shape == "city_only":
+                line1 = line2 = ""
+                zip5 = ""
+            elif shape == "po_box":
+                line1 = f"PO Box {rnd.randint(10, 9999)}"
+                line2 = city = ""
+            else:
+                line1 = line2 = ""
+                state_out = ""
+                city, zip5 = "", ""
+
         phone_home = format_phone(state, fmt) if chance(0.55) else ""
         phone_cell = format_phone(state, fmt) if chance(0.82) else ""
         phone_work = format_phone(state, fmt) if chance(0.21) else ""
+        if phone_home or phone_cell or phone_work:
+            phone_status = weighted([("VERIFIED", 0.40), ("UNVERIFIED", 0.34), ("BAD", 0.11),
+                                     ("DISCONNECTED", 0.10), ("WRONG_NUMBER", 0.05)])
+        else:
+            phone_status = "NONE"
 
         # Did the consumer ever pay the original creditor, and how long ago?
         client_paid_date = None
@@ -545,7 +692,8 @@ def build_accounts(clients, users):
 
         # The latent score, and how much of it has had time to show up.
         p_ever = propensity(debt_age_days, placement_bal, client_paid_days_ago, product,
-                            1 if phone_cell else 0, 1 if phone_home else 0, address_status)
+                            client["_lift"], 1 if phone_cell else 0, 1 if phone_home else 0,
+                            phone_status, address_status)
         paid_any = chance(p_ever * exposure(age_days))
         resolved = paid_any and chance(0.12 + 0.45 * p_ever)
         settled = resolved and client["allows_settlement"] == "Y" and chance(0.42)
@@ -619,7 +767,6 @@ def build_accounts(clients, users):
             "assigned_user_id": str(pick(active_collectors)),
             "last_worked_date": "",
             "next_action_date": "",
-            "collectability_score": str(max(1, min(99, int(round(100 * p_ever + rnd.gauss(0, 13)))))),
             "credit_reported_flag": "Y" if (chance(0.18) and product in ("CREDIT_CARD", "RETAIL_CARD", "PERSONAL_LOAN")) else "N",
             "created_timestamp": ts(business_dt(placement, 6, 23)),
             "last_updated_timestamp": ts(business_dt(status_date, 6, 23)),
@@ -630,8 +777,8 @@ def build_accounts(clients, users):
             "ssn": make_ssn(client["_ssn_dashes"]) if chance(0.93) else "",
             "date_of_birth": dob_str if chance(0.96) else "",
             "address_line1": line1, "address_line2": line2,
-            "city": city, "state": state, "zip_code": zip5,
-            "address_status": address_status,
+            "city": city, "state": state_out, "zip_code": zip5,
+            "address_status": address_status, "phone_status": phone_status,
             "phone_home": phone_home, "phone_cell": phone_cell, "phone_work": phone_work,
             "email": "",
             "employer_name": pick(EMPLOYERS) if chance(0.58) else "",
@@ -1094,7 +1241,7 @@ def build_notes(accounts, users, writer):
     third_party_accts = set(idx[325:340])
     multiline_accts = set(idx[340:400])
 
-    planted = {k: [] for k in ("N1", "N2", "N3", "N4a", "N4b", "N5", "N7", "N8", "N6")}
+    planted = {k: [] for k in ("N1", "N2", "N3", "N4a", "N4b", "N5", "N7", "N8", "N6", "A31")}
 
     for i, acct in enumerate(accounts):
         placement = acct["_placement"]
@@ -1142,7 +1289,8 @@ def build_notes(accounts, users, writer):
 
             if roll < 0.62 and phones:
                 phone = pick(phones)
-                result = weighted([(r, w) for r, w, _ in DIAL_RESULTS])
+                dial_tilt = PHONE_STATUS_DIAL_TILT.get(acct["phone_status"], {})
+                result = weighted([(r, w * dial_tilt.get(r, 1.0)) for r, w, _ in DIAL_RESULTS])
                 if result == "RPC":
                     # How the conversation goes depends on the same latent propensity
                     # that drives payment, so the notes carry real signal.
@@ -1316,6 +1464,11 @@ def build_notes(accounts, users, writer):
             events.insert(4, dup)
             planted["N5"].append(acct["account_id"])
 
+        if acct["phone_status"] in ("WRONG_NUMBER", "DISCONNECTED"):
+            dialed = sum(1 for e in events if e[2] == "OUTBOUND_CALL")
+            if dialed >= 6:
+                planted["A31"].append((acct["account_id"], dialed))
+
         for ev in events:
             when, user, contact, action, result, phone, follow, system, text = ev
             writer.writerow([note_id, acct["account_id"], ts(when), user, contact, action,
@@ -1323,6 +1476,13 @@ def build_notes(accounts, users, writer):
             note_id += 1
             stats["total"] += 1
 
+    wasted = sorted(planted["A31"], key=lambda t: -t[1])
+    record("A31", "accounts", "phone_status",
+           "Accounts whose phone the client already flagged as disconnected or a wrong number, "
+           "dialed six or more times anyway. Wasted dialer capacity at best, and continuing to "
+           "call a number known to belong to someone else is an FDCPA problem.",
+           [a for a, _ in wasted],
+           f"Worst case here was {wasted[0][1]} outbound calls on one account." if wasted else "")
     record("N1", "notes", "user_id", "Notes written by user_id 9999, which does not exist in users.csv.",
            sorted(set(planted["N1"])), "Left join notes to users on user_id.")
     record("N2", "notes", "note_datetime",
@@ -1369,33 +1529,18 @@ def corrupt_accounts(accounts, users, clients):
 
     used = set()
 
-    # A1 -- missing or incomplete addresses (about 6% of the file).
-    targets = sample(int(n * 0.062))
-    for a in targets:
-        mode = weighted([("no_line1", 0.22), ("no_city", 0.16), ("no_zip", 0.18),
-                         ("nothing", 0.14), ("unknown_literal", 0.12), ("po_only", 0.10),
-                         ("no_state", 0.08)])
-        if mode == "no_line1":
-            a["address_line1"] = ""
-        elif mode == "no_city":
-            a["city"] = ""
-        elif mode == "no_zip":
-            a["zip_code"] = ""
-        elif mode == "nothing":
-            a["address_line1"] = a["address_line2"] = a["city"] = a["state"] = a["zip_code"] = ""
-            a["address_status"] = "BAD"
-        elif mode == "unknown_literal":
-            a["address_line1"] = pick(["UNKNOWN", "ADDRESS UNKNOWN", "NO ADDRESS ON FILE", "."])
-            a["address_status"] = "BAD"
-        elif mode == "po_only":
-            a["address_line1"] = f"PO Box {rnd.randint(10, 9999)}"
-            a["city"] = ""
-        else:
-            a["state"] = ""
-    record("A1", "accounts", "address_line1, city, state, zip_code",
-           "Missing or incomplete consumer addresses, including literal 'UNKNOWN' text values.",
+    # A1 -- addresses the client never provided. This is not corruption; it is what
+    # arrived, which is why address_status carries NONE and why these accounts
+    # genuinely liquidate worse. The trap is that "no address" is written several
+    # different ways, so any count of it has to normalize first.
+    targets = [a for a in accounts if a["address_status"] == "NONE"]
+    record("A1", "accounts", "address_line1, city, state, zip_code, address_status",
+           "Accounts placed with no usable address. Written five different ways: every field "
+           "blank, a literal 'UNKNOWN' in address_line1, a city and state with no street, a PO "
+           "box with no city, and a street with no state.",
            [a["account_id"] for a in targets],
-           "About 6% of accounts. Note the several different shapes of 'missing'.")
+           "Real signal, not noise. These liquidate materially worse, so treat address_status "
+           "NONE as a feature rather than a row to drop.")
 
     # A2 -- ZIP codes that lost their leading zero somewhere upstream.
     ne = [a for a in accounts if a["zip_code"].startswith("0")]
@@ -2008,8 +2153,8 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
     lines.append("")
     lines.append("Liquidation in this data is not random. Every account carries a latent propensity "
                  "drawn from the fixed logistic model below, and that score decides whether it pays, "
-                 "how much and how often, what status it lands in, how its right party contacts go, "
-                 "and what `collectability_score` it carries.")
+                 "how much and how often, what status it lands in, and how its right party "
+                 "contacts go.")
     lines.append("")
     lines.append("The coefficients are constants in `generate.py`, not seeded, so any two data sets "
                  "share this model and differ only in noise. A scorecard fitted on one should hold "
@@ -2026,11 +2171,28 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
     lines.append(f"| ... and how recently, decaying to zero over 24 months | {W_CLIENT_PAID_RECENCY:+.2f} |")
     lines.append(f"| Cell phone on file | {W_HAS_CELL:+.2f} |")
     lines.append(f"| Home phone on file | {W_HAS_HOME:+.2f} |")
+    lines.append(f"| No phone of any kind | {W_NO_PHONE:+.2f} |")
+    lines.append(f"| Phone status VERIFIED | {W_PHONE_GOOD:+.2f} |")
+    lines.append(f"| Phone status BAD, DISCONNECTED or WRONG_NUMBER | {W_PHONE_BAD:+.2f} |")
     lines.append(f"| Address status VERIFIED | {W_ADDRESS_GOOD:+.2f} |")
     lines.append(f"| Address status BAD | {W_ADDRESS_BAD:+.2f} |")
+    lines.append(f"| No address provided | {W_NO_ADDRESS:+.2f} |")
+    lines.append(f"| Client lift, scaled by | {W_CLIENT_LIFT:.2f} |")
     for prod, w in sorted(PRODUCT_PROPENSITY.items(), key=lambda kv: -kv[1]):
         lines.append(f"| Product type {prod} | {w:+.2f} |")
     lines.append(f"| Gaussian noise, standard deviation | {PROPENSITY_NOISE_SD:.2f} |")
+    lines.append("")
+    lines.append("Each client also carries its own lift, standing in for data quality at placement, "
+                 "how hard the creditor worked the account first, and who their customers are. "
+                 "Clients inside one product class deliberately differ, which is what makes client "
+                 "and product type separate signals rather than the same one twice. A few clients "
+                 "place more than one kind of paper so the two are not perfectly collinear.")
+    lines.append("")
+    lines.append("| Client | Product mix | Lift |")
+    lines.append("| --- | --- | ---: |")
+    for c in clients:
+        mix = ", ".join(f"{p} {int(w * 100)}%" if w < 1 else p for p, w in c["_products"])
+        lines.append(f"| {c['client_name']} ({c['client_id']}) | {mix} | {c['_lift']:+.2f} |")
     lines.append("")
     lines.append(f"That latent score is then multiplied by an exposure term, "
                  f"`1 - exp(-days_on_book / {LIQUIDATION_TIME_CONSTANT_DAYS})`, because an account "

@@ -1,7 +1,9 @@
 # Generated output. Run "python generate.py" to produce these locally.
 data/
 data_*/
-ANSWER_KEY_*.md
+*.csv
+# Answer keys are regenerated on every run, so tracking them is pure churn.
+ANSWER_KEY*.md
 
 # Python
 __pycache__/

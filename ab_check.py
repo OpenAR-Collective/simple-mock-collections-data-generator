@@ -6,8 +6,12 @@ transfers: train on A, score B, and compare AUC and decile lift. A pattern that
 only exists in A is noise. One that holds on B is a pattern.
 
 There are no third party dependencies. The logistic regression is plain gradient
-descent on standardized features, which is more than enough for ten features and
-ten thousand rows.
+descent on standardized features with a light L2 penalty, which is more than enough
+for fifty features and ten thousand rows.
+
+Individual client dummies carry small standardized coefficients because each client
+covers only a few percent of the file. The client effect is real; look at liquidation
+by client within a single product type to see it plainly.
 
 Usage:
     python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md
@@ -46,7 +50,13 @@ def parse_date(value):
         return None
 
 
-def load(directory):
+def client_ids(directory):
+    """Stable client id ordering, so A and B share the same dummy columns."""
+    with open(os.path.join(directory, "clients.csv"), newline="", encoding="utf-8") as fh:
+        return sorted(row["client_id"] for row in csv.DictReader(fh))
+
+
+def load(directory, clients):
     """Build a feature matrix and the liquidation target for one data set."""
     def read(name):
         with open(os.path.join(directory, name), newline="", encoding="utf-8") as fh:
@@ -89,12 +99,18 @@ def load(directory):
             recency,
             1.0 if a["phone_cell"].strip() else 0.0,
             1.0 if a["phone_home"].strip() else 0.0,
+            1.0 if a["phone_status"] == "VERIFIED" else 0.0,
+            1.0 if a["phone_status"] in ("BAD", "DISCONNECTED", "WRONG_NUMBER") else 0.0,
+            1.0 if a["phone_status"] == "NONE" else 0.0,
             1.0 if a["address_status"] == "VERIFIED" else 0.0,
             1.0 if a["address_status"] == "BAD" else 0.0,
+            1.0 if a["address_status"] == "NONE" else 0.0,
             # Exposure control: a new account has not had time to pay yet.
             1.0 - math.exp(-max(0, days_on_book) / 165.0),
         ]
         features += [1.0 if a["product_type"] == p else 0.0 for p in PRODUCTS]
+        # Client identity matters on its own, separately from what the debt is for.
+        features += [1.0 if a["client_id"] == c else 0.0 for c in clients]
 
         rows.append(features)
         targets.append(1 if posted.get(a["account_id"], 0.0) > 0 else 0)
@@ -102,10 +118,15 @@ def load(directory):
     return rows, targets, meta
 
 
-FEATURE_NAMES = (["debt_age_years", "log10_balance", "has_client_payment",
-                  "client_payment_recency", "has_cell", "has_home",
-                  "address_verified", "address_bad", "exposure"]
-                 + [f"product_{p}" for p in PRODUCTS])
+BASE_FEATURES = ["debt_age_years", "log10_balance", "has_client_payment",
+                 "client_payment_recency", "has_cell", "has_home",
+                 "phone_verified", "phone_bad", "phone_none",
+                 "address_verified", "address_bad", "address_none", "exposure"]
+
+
+def feature_names(clients):
+    return (BASE_FEATURES + [f"product_{p}" for p in PRODUCTS]
+            + [f"client_{c}" for c in clients])
 
 
 def standardize(rows):
@@ -124,8 +145,14 @@ def apply_scaling(rows, means, sds):
     return [[(r[j] - means[j]) / sds[j] for j in range(len(r))] for r in rows]
 
 
-def fit(rows, targets, iterations=600, lr=0.5):
-    """Batch gradient descent on the log loss."""
+def fit(rows, targets, iterations=300, lr=1.2, l2=0.02):
+    """
+    Batch gradient descent on the log loss, with a light L2 penalty.
+
+    The penalty matters here: there are twenty two client dummies, and the
+    smaller clients carry only a few hundred accounts each, so an unpenalized
+    fit spends parameters on noise and the holdout gap widens.
+    """
     n, k = len(rows), len(rows[0])
     weights = [0.0] * k
     bias = 0.0
@@ -141,7 +168,7 @@ def fit(rows, targets, iterations=600, lr=0.5):
                 grad_w[j] += err * xi[j]
         bias -= lr * grad_b / n
         for j in range(k):
-            weights[j] -= lr * grad_w[j] / n
+            weights[j] -= lr * (grad_w[j] / n + l2 * weights[j])
     return weights, bias
 
 
@@ -197,8 +224,10 @@ def main():
         if not os.path.isdir(d):
             sys.exit(f"Missing directory {d}. Generate the pair first; see the header of this file.")
 
-    rows_a, y_a, _ = load(dir_a)
-    rows_b, y_b, _ = load(dir_b)
+    clients = client_ids(dir_a)
+    names = feature_names(clients)
+    rows_a, y_a, _ = load(dir_a, clients)
+    rows_b, y_b, _ = load(dir_b, clients)
     print(f"A: {os.path.basename(dir_a)}  {len(rows_a):,} accounts, {sum(y_a) / len(y_a):.1%} liquidated")
     print(f"B: {os.path.basename(dir_b)}  {len(rows_b):,} accounts, {sum(y_b) / len(y_b):.1%} liquidated")
     print()
@@ -222,12 +251,14 @@ def main():
     means_b, sds_b = standardize(rows_b)
     weights_b, _ = fit(apply_scaling(rows_b, means_b, sds_b), y_b)
     print("Standardized coefficients, fitted independently on each data set")
+    print(f"({len(names)} features including product and client dummies; "
+          f"terms under 0.02 on both sides are omitted)")
     print(f"  {'feature':26} {'A':>8} {'B':>8} {'diff':>8}")
     order = sorted(range(len(weights)), key=lambda j: -abs(weights[j]))
     for j in order:
         if abs(weights[j]) < 0.02 and abs(weights_b[j]) < 0.02:
             continue
-        print(f"  {FEATURE_NAMES[j]:26} {weights[j]:+8.3f} {weights_b[j]:+8.3f} "
+        print(f"  {names[j]:26} {weights[j]:+8.3f} {weights_b[j]:+8.3f} "
               f"{abs(weights[j] - weights_b[j]):8.3f}")
     print()
 

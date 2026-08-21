@@ -1,18 +1,21 @@
 # Simple Mock Collections Data Generator
 
 A seeded Python script that builds a synthetic "database" for a fictional third party
-debt collection agency, Acme Receivables Management, as six CSV files. It exists so
-that participants in a hands on session can point an AI tool at a realistic operational
-data set and work with it directly, without anyone having to expose real consumer data.
+debt collection agency, Acme Receivables Management, as six CSV files. It is for anyone
+who needs collections data that behaves like the real thing without touching real
+consumer records: building or demoing agency software, testing an ETL pipeline or a
+reporting stack, prototyping a liquidation scorecard, writing training material, or
+pointing an AI tool at an operational data set to see how it copes.
 
 The data looks like a system that has been running for five years, which means it also
-has the flaws of one. Sixty three classes of data quality defect are planted on purpose,
-catalogued automatically as they are applied, and documented in a facilitator answer
-key. Finding them is the exercise.
+has the flaws of one. Sixty four classes of data quality defect are planted on purpose,
+catalogued automatically as they are applied and written to a generated answer key. That is deliberate. Data that is too clean tells you nothing about whether your
+pipeline, your report or your model survives contact with production.
 
 Liquidation is not random either. Each account carries a latent propensity to pay built
 from the drivers that matter in real collections, so the data supports building an
-actual scorecard, and two seeds give you a matched train and holdout pair.
+actual scorecard rather than fitting noise, and two seeds give you a matched train and
+holdout pair.
 
 Everything is generated. The names, addresses, Social Security numbers, phone numbers,
 email addresses, account numbers and clients are invented, and no row describes a real
@@ -20,9 +23,11 @@ person or a real debt.
 
 ## Quick start
 
-You need Python 3.8 or newer. There are no third party dependencies; the script uses
-only the standard library, so there is nothing to install and no virtual environment to
-set up.
+**Nothing to install.** You need Python 3.8 or newer and nothing else. There is no
+`pip install` step, no `requirements.txt` and no virtual environment, because every
+script here uses only the standard library: `argparse`, `csv`, `math`, `os`, `random`
+and `datetime`. That is deliberate, so the data can be regenerated on a locked down
+machine or inside a container with no package access.
 
 ```bash
 git clone https://github.com/OpenAR-Collective/simple-mock-collections-data-generator.git
@@ -38,17 +43,17 @@ python generate.py
 
 On Windows, use `py generate.py` if `python` is not on your PATH.
 
-That writes the six CSV files into a `data/` directory next to the script, along with
-`ANSWER_KEY.md` in the repository root, and prints a summary:
+That writes the six CSV files into a `data/` directory next to the script, writes
+`ANSWER_KEY.md` alongside it, and prints a summary:
 
 ```
-clients                      16
+clients                      22
 users                        49
-accounts                 10,000   (3,477 closed = 34.8%)
-payments                 13,339
-payment_arrangements      2,276
-notes                   197,573   (19.8 per account)
-planted defects              63
+accounts                 10,000   (3,529 closed = 35.3%)
+payments                 12,657
+payment_arrangements      2,135
+notes                   195,897   (19.6 per account)
+planted defects              64
 ```
 
 The whole run takes a few seconds and produces about 41 MB. To confirm the output is
@@ -101,19 +106,31 @@ Two things to know:
 Liquidation in this data is not random. Every account carries a latent propensity drawn
 from a fixed logistic model over the things that actually drive collections performance,
 and that score then decides whether the account pays, how much and how often, what
-status it ends in, how its phone calls go, and what vendor score it carries. The
-result is a data set you can build a real scorecard on.
+status it ends in, and how its phone calls go. The result is a data set you can build a
+real scorecard on rather than one where liquidation is a coin flip.
 
 The drivers, in rough order of strength:
 
 | Driver | Direction |
 | --- | --- |
+| **Contact data** | The strongest family. A cell phone and a verified address help; a bad, disconnected or wrong number hurts, and no phone or no address at all hurts more. You cannot collect from someone you cannot reach |
 | **Debt age at placement**, from charge-off to placement | Newer paper pays. Primary placements are weeks old, tertiary paper is years old |
 | **Placement balance** | Smaller balances pay. The effect is per 10x, not per dollar |
 | **Client last payment** | A consumer who paid the original creditor pays the agency, and the more recently the better |
-| **Contactability** | A cell phone and a verified address help; a bad address hurts. You cannot collect from someone you cannot reach |
 | **Product type** | Small utility and telecom balances liquidate; auto deficiency and student paper does not |
+| **Client** | Each creditor has its own lift, standing in for data quality at placement, how hard they worked the account first, and who their customers are |
 | **Prior agency payment or promise** | By far the strongest, and partly self fulfilling. See the note on time splits below |
+
+The contact fields are exactly what the client sent. The agency has done no skip tracing
+or address cleanup of its own, so a missing or bad address is not a record keeping
+artifact, it means the agency genuinely cannot reach that consumer, and it is a real
+predictor rather than a row to drop.
+
+Client and product type are separate signals, not the same one twice. Several clients
+share a product class and deliberately liquidate differently within it, and three of them
+place more than one kind of paper, so the two are not collinear and a model can tell them
+apart. The two Mercy Regional client codes are the same underlying creditor and carry the
+same lift, so they should behave identically once you notice they are one client.
 
 Two things are deliberately kept apart. **Debt age** is how stale the paper was when it
 arrived, and it is a genuine driver. **Time on book** is how long the agency has had it,
@@ -125,9 +142,6 @@ The notes carry signal too. A consumer who is going to pay promises and pays; on
 not argues. Promise to pay and arrangement notes concentrate among high propensity
 accounts, refusals and disputes among low ones, so a model can read the note text and
 learn something real.
-
-`collectability_score` is a noisy proxy for the latent score, in the way a purchased
-vendor score is. It helps, and it is nowhere near sufficient on its own.
 
 The exact coefficients are printed in `ANSWER_KEY.md` on every run, so you can compare a
 fitted model against the truth.
@@ -151,13 +165,15 @@ python ab_check.py data_a data_b
 ```
 
 `ab_check.py` fits a logistic scorecard on A, applies it unchanged to B, and reports AUC
-and decile lift for both. It uses only the standard library. A representative run:
+and decile lift for both, using 48 features including product and client dummies. Like
+everything else here it uses only the standard library, and it takes about 40 seconds.
+A representative run:
 
 ```
 Model fitted on A, applied unchanged to B
-  AUC on A (in sample)     0.7479
-  AUC on B (never seen)    0.7508
-  difference               0.0029
+  AUC on A (in sample)     0.7584
+  AUC on B (never seen)    0.7591
+  difference               0.0007
 ```
 
 An AUC near 0.75 is deliberate. The model has a noise term precisely so that a perfect
@@ -204,10 +220,10 @@ Everything below lands in `data/`, which is not tracked in this repository. Run
 | File | Rows | Size | What it holds |
 | --- | ---: | ---: | --- |
 | `data/accounts.csv` | 10,000 | 4.1 MB | One row per placed account, with the consumer's details on the same row |
-| `data/notes.csv` | 197,573 | 35 MB | Collection activity notes, roughly 20 per account |
-| `data/payments.csv` | 13,339 | 2.1 MB | Payment transactions, including returns and reversals |
-| `data/payment_arrangements.csv` | 2,276 | 390 KB | Installment plans and settlement agreements |
-| `data/clients.csv` | 16 | 3 KB | The creditors that place accounts with the agency |
+| `data/notes.csv` | 195,897 | 35 MB | Collection activity notes, roughly 20 per account |
+| `data/payments.csv` | 12,657 | 2.1 MB | Payment transactions, including returns and reversals |
+| `data/payment_arrangements.csv` | 2,135 | 390 KB | Installment plans and settlement agreements |
+| `data/clients.csv` | 22 | 5 KB | The creditors that place accounts with the agency |
 | `data/users.csv` | 49 | 6 KB | Agency staff, from collectors to compliance |
 
 All files are UTF-8, comma delimited, with a header row and RFC 4180 quoting. Note
@@ -315,7 +331,6 @@ mind before trusting it.
 | `assigned_user_id` | Collector who owns the account, joins to `users.csv` |
 | `last_worked_date` | Last date any collector touched the account |
 | `next_action_date` | Date the account is queued to be worked again |
-| `collectability_score` | Vendor score from 1 to 99, higher means more likely to pay. Useful but noisy, like the real thing |
 | `credit_reported_flag` | Whether the agency reports this account to the bureaus |
 | `created_timestamp` | When the account row was created |
 | `last_updated_timestamp` | When the account row last changed |
@@ -323,8 +338,9 @@ mind before trusting it.
 | `ssn` | Consumer Social Security number, synthetic |
 | `date_of_birth` | Consumer date of birth |
 | `address_line1`, `address_line2`, `city`, `state`, `zip_code` | Consumer address, US only |
-| `address_status` | `VERIFIED`, `UNVERIFIED` or `BAD` |
+| `address_status` | `VERIFIED`, `UNVERIFIED`, `BAD`, or `NONE` when the client sent no usable address |
 | `phone_home`, `phone_cell`, `phone_work` | Consumer phone numbers |
+| `phone_status` | What the client said about the best number: `VERIFIED`, `UNVERIFIED`, `BAD`, `DISCONNECTED`, `WRONG_NUMBER`, or `NONE` when no phone was provided |
 | `email` | Consumer email address |
 | `employer_name` | Employer, where known |
 | `do_not_call_flag` | Consumer asked not to be called by phone |
@@ -461,19 +477,19 @@ A handful of fields are dependable. Every account has an `account_id`,
 | `refdata.py` | Name, street and city pools, plus real US city, state and ZIP combinations |
 | `validate.py` | Sanity checks over whatever was generated |
 | `ab_check.py` | Fits a liquidation scorecard on one data set and tests it on another |
-| `ANSWER_KEY.md` | Facilitator key, written by the generator on every run |
+| `ANSWER_KEY.md` | Defect catalog and true model coefficients, written on every run, not tracked |
 | `data/` | Generated output, not tracked here |
 
-## A note for facilitators
+## The answer key
 
-`ANSWER_KEY.md` lists every planted defect with its counts and sample record ids, and
-it is regenerated on each run so it can never drift from the data. It is committed here
-because the generator itself is public, and `generate.py` describes every defect inline
-anyway, so there is nothing to hide by leaving the key out.
+`ANSWER_KEY.md` lists every planted defect with its counts and sample record ids, plus
+the exact coefficients of the propensity model. It is written on every run and is not
+tracked in git, since its contents change with the seed and committing it would produce
+a large diff on every run for no benefit. Run the generator and read your own copy.
 
-That does mean anyone who finds this repository can read the answers. If you want
-participants to discover the issues themselves, hand them the six CSV files rather than
-a link to this repository.
+The defect catalog is not a secret either way: `generate.py` describes every defect
+inline. If you are running an exercise and want people to discover the issues
+themselves, hand them the six CSV files rather than a link to this repository.
 
 ## License
 
