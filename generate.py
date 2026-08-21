@@ -11,14 +11,43 @@ Produces a small flat-file "database" that behaves like real collections data:
     data/payment_arrangements.csv  promises and installment plans
     data/notes.csv                 collection activity notes (largest table)
 
-Everything is deterministic: the same SEED produces byte-identical files.
+Everything is deterministic: the same seed produces byte-identical files.
 All names, addresses, SSNs, phone numbers and account numbers are synthetic.
 
 Deliberate data quality defects are planted throughout and recorded in
 ANSWER_KEY.md as they are applied, so the catalog can never drift from the
 data it describes.
 
-Usage:  python generate.py
+Usage
+-----
+    python generate.py [--seed SEED] [--out DIR] [--key PATH] [--accounts N]
+
+    --seed SEED     Any text or integer. Default: "Sample Seed". The same seed
+                    and the same version of this script always produce the same
+                    files, so a seed is how you name a data set rather than how
+                    you randomize it. A digits-only value is read as an integer,
+                    so --seed 12345 and --seed "12345" are the same data set.
+
+    --out DIR       Directory to write the six CSV files into, created if it does
+                    not exist, relative to this script unless absolute.
+                    Default: data
+
+    --key PATH      Where to write the answer key, relative to this script unless
+                    absolute. Default: ANSWER_KEY.md
+
+    --accounts N    Number of accounts to generate. Every other file scales with
+                    it, so N=500 gives a set small enough to open in a
+                    spreadsheet. Default: 10000
+
+Examples
+--------
+    python generate.py
+    python generate.py --accounts 500 --out sample
+    python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md
+    python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md
+
+The last two are the matched pair ab_check.py expects: same model, different
+noise, so a scorecard fitted on A can be tested honestly on B.
 """
 
 import argparse
@@ -2057,16 +2086,28 @@ def write_csv(name, columns, rows):
 def parse_args():
     ap = argparse.ArgumentParser(
         description="Generate a synthetic collections data set.",
-        epilog=("Example A/B pair:\n"
+        epilog=("Examples:\n"
+                "  python generate.py\n"
+                "  python generate.py --accounts 500 --out sample\n"
                 '  python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md\n'
-                '  python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md'),
+                '  python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md\n'
+                "\n"
+                "The last two are the matched pair ab_check.py expects: same model,\n"
+                "different noise, so a scorecard fitted on A can be tested on B."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--seed", default=SEED,
-                    help='Any text or integer. Default: "%(default)s"')
-    ap.add_argument("--out", default="data", help="Output directory. Default: %(default)s")
-    ap.add_argument("--key", default="ANSWER_KEY.md", help="Answer key path. Default: %(default)s")
-    ap.add_argument("--accounts", type=int, default=ACCOUNT_COUNT,
-                    help="Number of accounts. Default: %(default)s")
+    ap.add_argument("--seed", default=SEED, metavar="SEED",
+                    help='Any text or integer. The same seed and the same version of this '
+                         'script always produce the same files, so a seed names a data set '
+                         'rather than randomizing it. Default: "%(default)s"')
+    ap.add_argument("--out", default="data", metavar="DIR",
+                    help="Directory for the six CSV files, created if missing. Relative to "
+                         "this script unless absolute. Default: %(default)s")
+    ap.add_argument("--key", default="ANSWER_KEY.md", metavar="PATH",
+                    help="Where to write the answer key. Relative to this script unless "
+                         "absolute. Default: %(default)s")
+    ap.add_argument("--accounts", type=int, default=ACCOUNT_COUNT, metavar="N",
+                    help="How many accounts to generate. Every other file scales with it. "
+                         "Default: %(default)s")
     return ap.parse_args()
 
 

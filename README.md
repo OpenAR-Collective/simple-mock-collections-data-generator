@@ -56,8 +56,32 @@ notes                   195,897   (19.6 per account)
 planted defects              64
 ```
 
-The whole run takes a few seconds and produces about 41 MB. To confirm the output is
-sound, run the checks:
+### Command line arguments
+
+`generate.py` takes four optional arguments. Run it with no arguments and you get the
+defaults below.
+
+| Argument | Default | What it does |
+| --- | --- | --- |
+| `--seed SEED` | `"Sample Seed"` | Any text or integer. The same seed and the same version of the script always produce the same files, so a seed names a data set rather than randomizing it. A digits-only value is read as an integer, so `--seed 12345` and `--seed "12345"` give the same set |
+| `--out DIR` | `data` | Directory for the six CSV files, created if missing. Relative to the script unless absolute |
+| `--key PATH` | `ANSWER_KEY.md` | Where to write the answer key. Relative to the script unless absolute |
+| `--accounts N` | `10000` | How many accounts to generate. Every other file scales with it |
+
+A few things they are useful for. A small set you can open in a spreadsheet:
+
+```bash
+python generate.py --accounts 500 --out sample
+```
+
+A second data set that does not overwrite your first:
+
+```bash
+python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md
+```
+
+`python generate.py --help` prints the same list. The whole run takes a few seconds and
+produces about 41 MB at the default size. To confirm the output is sound, run the checks:
 
 ```bash
 python validate.py
@@ -66,20 +90,20 @@ python validate.py
 The generated files are not committed to this repository; `data/` is in `.gitignore`.
 The generator is seeded, so any two people who run it get byte identical files.
 
-### Tuning what you get
+### Tuning what the arguments do not cover
 
-The constants at the top of `generate.py` control the shape of the data set:
+`SEED` and `ACCOUNT_COUNT` are constants at the top of `generate.py` that `--seed` and
+`--accounts` override, so use the flags for those. These have no flag and are edited in
+the file:
 
 | Constant | Default | Effect |
 | --- | --- | --- |
-| `SEED` | `"Sample Seed"` | Any text, or any integer. Change it for a completely different but equally valid data set |
-| `ACCOUNT_COUNT` | `10_000` | Number of accounts, which drives every other file |
-| `TODAY` | `2026-08-20` | The "now" every date in the set is relative to |
+| `TODAY` | `2026-08-20` | The "now" every date in the set is relative to. Fixed rather than the real clock, so a set generated today and one generated next year are comparable |
 | `HISTORY_START` | `TODAY` minus 1,826 days | How far back placements go, five years by default |
 | `NOTE_ACTIVITY_MEAN` | `16` | Collector activity notes per account, before system notes are added |
 
-Volumes scale roughly linearly, so `ACCOUNT_COUNT = 500` gives a set small enough to
-open in a spreadsheet.
+The propensity coefficients further down the file are tunable in the same way, and are
+documented under [Propensity to pay](#propensity-to-pay).
 
 ### Reproducibility
 
