@@ -2,7 +2,7 @@
 Mock data generator for "Acme Receivables Management", a fictional third-party
 debt collection agency.
 
-Produces a small flat-file "database" for hands-on AI tooling exercises:
+Produces a small flat-file "database" that behaves like real collections data:
 
     data/clients.csv               placing creditors
     data/users.csv                 agency staff
@@ -15,8 +15,8 @@ Everything is deterministic: the same SEED produces byte-identical files.
 All names, addresses, SSNs, phone numbers and account numbers are synthetic.
 
 Deliberate data quality defects are planted throughout and recorded in
-ANSWER_KEY.md as they are applied, so the facilitator key can never drift
-from the data.
+ANSWER_KEY.md as they are applied, so the catalog can never drift from the
+data it describes.
 
 Usage:  python generate.py
 """
@@ -49,7 +49,7 @@ KEY_PATH = os.path.join(BASE_DIR, "ANSWER_KEY.md")   # overridden by --key
 
 rnd = random.Random(SEED)
 
-# Registry of planted defects, written out as the facilitator answer key.
+# Registry of planted defects, written out as the answer key.
 ISSUES = []
 
 
@@ -2124,10 +2124,13 @@ def main():
 def write_answer_key(accounts, payments, arrangements, note_count, clients, users):
     closed = sum(1 for a in accounts if a["account_status"] in CLOSED_SET)
     lines = []
-    lines.append("# Facilitator answer key")
+    lines.append("# Answer key")
     lines.append("")
-    lines.append("Do not hand this file to participants. It lists every defect planted in the data set, "
-                 "generated directly by `generate.py`, so it stays in step with the files.")
+    lines.append("Every defect planted in this data set, plus the true coefficients of the "
+                 "propensity model. Written by `generate.py` on each run, so it always matches "
+                 "the files sitting next to it.")
+    lines.append("")
+    lines.append("Hold this back if you want someone to find the issues on their own.")
     lines.append("")
     lines.append("## Volumes")
     lines.append("")
@@ -2214,8 +2217,8 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
     lines.append("")
     lines.append("## Fields that are always reliable")
     lines.append("")
-    lines.append("These are populated on every account row and are internally consistent, so participants "
-                 "can anchor on them: `account_id`, `client_account_number`, `placement_date`, "
+    lines.append("These are populated on every account row and are internally consistent, so they "
+                 "are safe to anchor on: `account_id`, `client_account_number`, `placement_date`, "
                  "`account_status`, `status_date`, `original_balance`, `placement_balance`. Note that "
                  "`placement_balance` carries a dollar sign on twelve rows (defect A21); the value itself "
                  "is still correct.")
@@ -2248,9 +2251,12 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
             lines.append("")
             lines.append(f"Sample ids: {samples}")
             lines.append("")
-    lines.append("## Suggested exercises")
+    lines.append("## What this data is good for")
     lines.append("")
     for item in [
+        "Load it into your warehouse or application and see which columns the ingest chokes "
+        "on. The embedded newlines, the dollar signs in numeric columns and the two date "
+        "formats are all there on purpose.",
         "Profile every file and produce a data dictionary without being told the schema.",
         "Reconcile `accounts.total_paid` against the sum of POSTED payments and explain each break.",
         "Find every account where the notes contradict the compliance flags (A8, N4a, N4b).",

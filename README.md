@@ -88,7 +88,7 @@ is verified rather than assumed: generating twice in separate processes produces
 same SHA-256 for all six CSVs and for the answer key.
 
 The default seed is the text `"Sample Seed"`. Any text works, as does any integer, so
-`SEED = "spring-workshop-2026"` is fine. Python derives a text seed from a SHA-512 of
+`SEED = "regression-suite-2026"` is fine. Python derives a text seed from a SHA-512 of
 the characters rather than from `hash()`, so it gives the same result on every machine
 and is unaffected by `PYTHONHASHSEED`.
 
@@ -190,9 +190,12 @@ paid has told you the answer. Use them only with a time split, for example featu
 the first 90 days on book predicting payment after day 90. Watch for censoring when you
 do, since accounts that paid in full closed and cannot pay again.
 
-**A caution worth repeating to participants.** A model trained here learns the pattern
-injected by `generate.py`. It says nothing about real consumers, and the product type
-weights in particular were chosen to be plausible and learnable, not measured.
+**A caution worth passing along with the data.** A model trained here learns the pattern
+injected by `generate.py` and nothing more. It says nothing about real consumers, and the
+product type and client weights in particular were chosen to be plausible and learnable
+rather than measured from real portfolios. Use this set to prove that a pipeline, a
+report or a modeling approach works. Do not use it to decide anything about a real
+portfolio.
 
 ## Why this is safe to hand out
 
@@ -487,9 +490,10 @@ the exact coefficients of the propensity model. It is written on every run and i
 tracked in git, since its contents change with the seed and committing it would produce
 a large diff on every run for no benefit. Run the generator and read your own copy.
 
-The defect catalog is not a secret either way: `generate.py` describes every defect
-inline. If you are running an exercise and want people to discover the issues
-themselves, hand them the six CSV files rather than a link to this repository.
+The defect catalog is not a secret either way, since `generate.py` describes every defect
+inline. If you want someone to find the issues on their own, whether that is a new
+analyst, a candidate in a technical exercise or an AI tool you are evaluating, hand over
+the six CSV files rather than a link to this repository.
 
 ## License
 
