@@ -14,13 +14,16 @@ Produces a small flat-file "database" that behaves like real collections data:
 Everything is deterministic: the same seed produces byte-identical files.
 All names, addresses, SSNs, phone numbers and account numbers are synthetic.
 
-Deliberate data quality defects are planted throughout and recorded in
-ANSWER_KEY.md as they are applied, so the catalog can never drift from the
-data it describes.
+The data set is clean unless you ask otherwise. --defects plants deliberate data
+quality defects at a ratio you choose and records each one in ANSWER_KEY.md as it
+is applied, so the catalog can never drift from the data it describes. The
+defects draw from their own random stream, so the same seed with and without
+--defects gives the same clean data underneath and the two sets can be diffed.
 
 Usage
 -----
     python generate.py [--seed SEED] [--out DIR] [--key PATH] [--accounts N]
+                       [--defects RATIO]
 
     --seed SEED     Any text or integer. Default: "Sample Seed". The same seed
                     and the same version of this script always produce the same
@@ -39,9 +42,17 @@ Usage
                     it, so N=500 gives a set small enough to open in a
                     spreadsheet. Default: 10000
 
+    --defects RATIO How many defects to plant, as a share of all the records in
+                    the clean set across all six files. 1:1000, 1/1000, 0.001
+                    and 0.1% all mean one defect per thousand records. They are
+                    spread across the defect classes in fixed proportions, so
+                    common kinds of damage stay common and rare kinds drop out
+                    at sparse ratios. Default: 0, a clean set.
+
 Examples
 --------
     python generate.py
+    python generate.py --defects 1:1000
     python generate.py --accounts 500 --out sample
     python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md
     python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md
@@ -55,6 +66,8 @@ import csv
 import math
 import os
 import random
+import re
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 from refdata import (AREA_CODES, BK_DISTRICTS, CITIES, EMAIL_DOMAINS, EMPLOYERS,
@@ -78,19 +91,123 @@ KEY_PATH = os.path.join(BASE_DIR, "ANSWER_KEY.md")   # overridden by --key
 
 rnd = random.Random(SEED)
 
+# Planted defects draw from this stream instead, so the clean data under them is
+# the same with and without --defects. defect_stream() swaps it in for a block.
+defect_rnd = random.Random()
+
 # Registry of planted defects, written out as the answer key.
 ISSUES = []
 
+# How many instances of each defect class to plant. Empty means a clean run.
+QUOTA = {}
 
-def record(code, table, columns, description, ids, hint=""):
-    """Log a planted data quality defect for the answer key."""
+# Relative weight of each defect class. --defects fixes how many defects go in
+# altogether and this table says how they are shared out. Most weights began as
+# the fixed counts the generator used before the ratio existed, so the mix is the
+# one the answer key has always had: name casing, stripped ZIP zeros and
+# terminated assignees are common, an orphaned client_id is rare. A32 through A35
+# are format drift that used to be baked in per client, and carry weights of
+# their own. Real conditions that are not defects (A1, A26, A31, C1) are not here.
+DEFECT_MIX = {
+    # accounts
+    "A2": 485, "A3": 35, "A4": 40, "A5": 25, "A6": 12, "A7": 18, "A8": 10, "A9a": 7,
+    "A9b": 5, "A10a": 8, "A10b": 6, "A11": 20, "A12": 14, "A13": 60, "A14": 90,
+    "A15": 22, "A16a": 120, "A16b": 9, "A17": 4, "A18": 140, "A19a": 15, "A19b": 10,
+    "A20a": 30, "A20b": 50, "A21": 12, "A22": 9, "A23": 40, "A24": 70, "A25": 6,
+    "A27": 20, "A28": 15, "A29": 30, "A30": 40, "A32": 100, "A33": 80, "A34": 60,
+    "A35": 60,
+    # payments
+    "P1": 12, "P2": 25, "P3": 10, "P4": 15, "P5": 6, "P6": 20, "P7": 5, "P8": 18,
+    # payment_arrangements
+    "R1": 60, "R2": 18, "R3": 30, "R4": 12, "R5": 10, "R6": 8,
+    # notes
+    "N1": 40, "N2": 25, "N3": 116, "N4a": 35, "N4b": 25, "N5": 50, "N6": 60, "N7": 30,
+    "N8": 15,
+    # clients and users
+    "C2": 1, "C3": 1, "U1": 1, "U2": 2,
+}
+
+
+def record(code, table, columns, description, ids, hint="", defect=True):
+    """Log a planted defect for the answer key, or with defect=False a real
+    condition in the data that is worth knowing about but is not one."""
     ids = list(ids)
     ISSUES.append({
         "code": code, "table": table, "columns": columns,
         "description": description, "count": len(ids),
-        "samples": ids[:6], "hint": hint,
+        "samples": ids[:6], "hint": hint, "defect": defect,
     })
     return ids
+
+
+def quota(code):
+    """How many instances of a defect class this run plants."""
+    return QUOTA.get(code, 0)
+
+
+@contextmanager
+def defect_stream():
+    """Run a block against the defect random stream instead of the base one."""
+    global rnd
+    base, rnd = rnd, defect_rnd
+    try:
+        yield
+    finally:
+        rnd = base
+
+
+def take(rows, k, predicate=None):
+    """k distinct rows chosen at random, or fewer when fewer qualify."""
+    if k <= 0:
+        return []
+    pool = [r for r in rows if predicate is None or predicate(r)]
+    rnd.shuffle(pool)
+    return pool[:k]
+
+
+def parse_ratio(text):
+    """Read 1:1000, 1/1000, 0.001 or 0.1% as a fraction. 0, none and off mean clean."""
+    s = str(text).strip().lower()
+    if s in ("", "0", "none", "off", "clean"):
+        return 0.0
+    try:
+        if s.endswith("%"):
+            value = float(s[:-1]) / 100.0
+        elif ":" in s or "/" in s:
+            top, bottom = re.split(r"[:/]", s)
+            value = float(top) / float(bottom)
+        else:
+            value = float(s)
+    except (ValueError, ZeroDivisionError):
+        value = -1.0
+    if not 0.0 <= value <= 1.0:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a ratio between 0 and 1; use a form like 1:1000, 1/1000, 0.001 or 0.1%")
+    return value
+
+
+def allocate_defects(rate, records):
+    """Share rate x records defect instances out across the classes in DEFECT_MIX.
+
+    Each class gets its proportional share rounded down, and the instances left
+    over go to the classes with the largest remainders, so the total is exact and
+    the split is the same on every run.
+    """
+    total = round(rate * records)
+    weight = sum(DEFECT_MIX.values())
+    shares = {code: total * w / weight for code, w in DEFECT_MIX.items()}
+    counts = {code: int(share) for code, share in shares.items()}
+    leftover = total - sum(counts.values())
+    for code in sorted(shares, key=lambda c: (counts[c] - shares[c], c))[:leftover]:
+        counts[code] += 1
+    return counts
+
+
+class CountingWriter:
+    """Stands in for the notes csv writer when only the row count matters."""
+
+    def writerow(self, row):
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -176,7 +293,7 @@ CLIENT_SPECS = [
      "digits": 7, "rate": 30.0, "weight": 4, "lift": 0.10,
      "products": [("DENTAL", 1.0)]},
     {"name": "Brightline Dental Partners", "industry": "Healthcare", "prefix": "BDP",
-     "digits": 8, "rate": 31.0, "weight": 3, "lift": -0.14, "no_email": True,
+     "digits": 8, "rate": 31.0, "weight": 3, "lift": -0.14,
      "products": [("DENTAL", 1.0)]},
     {"name": "Summit Peak Bank, N.A.", "industry": "Banking", "prefix": "",
      "digits": 12, "rate": 30.0, "weight": 12, "lift": 0.12, "interest": True,
@@ -203,7 +320,7 @@ CLIENT_SPECS = [
      "digits": 9, "rate": 19.5, "weight": 5, "lift": -0.10, "fee": True,
      "products": [("UTILITY", 1.0)]},
     {"name": "Clearwave Communications", "industry": "Telecom", "prefix": "CW",
-     "digits": 12, "rate": 24.0, "weight": 8, "lift": -0.06, "fee": True, "dob_us_format": True,
+     "digits": 12, "rate": 24.0, "weight": 8, "lift": -0.06, "fee": True,
      "products": [("TELECOM", 1.0)]},
     {"name": "Northstar Wireless", "industry": "Telecom", "prefix": "NSW",
      "digits": 10, "rate": 25.5, "weight": 5, "lift": 0.16, "fee": True,
@@ -219,7 +336,7 @@ CLIENT_SPECS = [
      "products": [("STUDENT_LOAN", 1.0)]},
     {"name": "Titan Fitness Clubs", "industry": "Fitness", "prefix": "TFC",
      "digits": 6, "rate": 40.0, "weight": 6, "lift": -0.05, "fee": True,
-     "lapsed": True, "inactive": True, "products": [("GYM_MEMBERSHIP", 1.0)]},
+     "products": [("GYM_MEMBERSHIP", 1.0)]},
     {"name": "Harbor Point Veterinary", "industry": "Veterinary", "prefix": "HPV",
      "digits": 6, "rate": 33.0, "weight": 3, "lift": 0.05,
      "products": [("VETERINARY", 1.0)]},
@@ -235,27 +352,19 @@ CLIENT_SPECS = [
 ]
 
 PHONE_FORMATS = ["###-###-####", "(###) ###-####", "##########", "###.###.####"]
+PHONE_COLUMNS = ("phone_home", "phone_cell", "phone_work")
 
 
 def build_clients():
     clients = []
-    lapsed_id = dup_ids = no_email_id = None
     for i, spec in enumerate(CLIENT_SPECS, start=1):
         client_id = 100 + i
         name, prefix = spec["name"], spec["prefix"]
         interest, fee = spec.get("interest", False), spec.get("fee", False)
         city, state, zip5 = pick(CITIES)
-        # Every contract predates the placement window, so the only contract-window
-        # problem in the data is the deliberate one below.
+        # Every contract predates the placement window and runs past today.
         start = rand_date(date(2015, 1, 1), HISTORY_START - timedelta(days=30))
-        # One client's contract has lapsed but placements keep arriving (defect C2).
-        if spec.get("lapsed"):
-            end = date(2025, 3, 31)
-            lapsed_id = client_id
-        else:
-            end = TODAY + timedelta(days=rnd.randint(200, 1800))
-        if spec.get("no_email"):
-            no_email_id = client_id
+        end = TODAY + timedelta(days=rnd.randint(200, 1800))
         contact_first = pick(FIRST_NAMES_F + FIRST_NAMES_M)
         contact_last = pick(LAST_NAMES)
         # The product listed on the client record is the one they place most of.
@@ -267,8 +376,7 @@ def build_clients():
             "industry": spec["industry"],
             "primary_product_type": primary,
             "contact_name": f"{contact_first} {contact_last}",
-            "contact_email": ("" if spec.get("no_email") else
-                              f"{contact_first[0].lower()}{contact_last.lower()}"
+            "contact_email": (f"{contact_first[0].lower()}{contact_last.lower()}"
                               f"@{name.split()[0].lower().strip(',')}.com"),
             "contact_phone": f"{pick(AREA_CODES[state])}-555-{make_line_number():04d}",
             "address_line1": f"{rnd.randint(100, 8999)} {pick(STREET_NAMES)} {pick(STREET_TYPES)}",
@@ -285,9 +393,6 @@ def build_clients():
             "_prefix": prefix, "_digits": spec["digits"], "_products": spec["products"],
             "_interest": interest, "_fee": fee, "_weight": spec["weight"],
             "_lift": spec["lift"],
-            "_phone_format": PHONE_FORMATS[i % len(PHONE_FORMATS)],
-            "_ssn_dashes": i % 3 != 0,
-            "_dob_us_format": bool(spec.get("dob_us_format")),
         })
     dup_ids = [c["client_id"] for c in clients if c["client_name"].startswith("Mercy Regional")]
     record("C1", "clients", "client_name",
@@ -295,11 +400,8 @@ def build_clients():
            "these routinely, for separate facilities, contract revisions or billing systems, so it "
            "is not an error. It still splits any report that groups by client_id, and the two "
            "records liquidate identically because they are the same client.",
-           dup_ids, "Compare account counts, balances and liquidation by client_name against client_id.")
-    record("C2", "clients", "contract_end_date",
-           "Client contract ended 2025-03-31 but accounts were placed under it afterward.",
-           [lapsed_id], "Join accounts.placement_date against clients.contract_end_date.")
-    record("C3", "clients", "contact_email", "Client record missing a contact email.", [no_email_id])
+           dup_ids, "Compare account counts, balances and liquidation by client_name against client_id.",
+           defect=False)
     return clients
 
 
@@ -326,6 +428,7 @@ TEAMS = ["ALPHA", "BRAVO", "CHARLIE", "EARLY_OUT", "LEGAL"]
 def build_users():
     users = []
     uid = 1000
+    taken = {"system"}      # usernames in use; a clean staff list has no repeats
     for role, count in ROLE_PLAN:
         for _ in range(count):
             uid += 1
@@ -338,8 +441,13 @@ def build_users():
                     "monthly_goal_amount": "", "last_login_date": "",
                 })
                 continue
-            first = pick(FIRST_NAMES_F + FIRST_NAMES_M)
-            last = pick(LAST_NAMES)
+            while True:
+                first = pick(FIRST_NAMES_F + FIRST_NAMES_M)
+                last = pick(LAST_NAMES)
+                handle = f"{first[0].lower()}{last.lower()}"[:14]
+                if handle not in taken:
+                    taken.add(handle)
+                    break
             hire = rand_date(date(2014, 1, 1), date(2026, 5, 1))
             # About a fifth of staff have left; collections has high turnover.
             terminated = chance(0.22) and hire < date(2025, 6, 1)
@@ -367,17 +475,6 @@ def build_users():
         elif u["role"] in ("SUPERVISOR", "TEAM_LEAD", "COMPLIANCE", "LEGAL_SPECIALIST"):
             u["manager_user_id"] = str(pick(managers))
 
-    # Defect U2: duplicate username across two active staff.
-    dupe_pair = [u for u in users if u["role"] == "COLLECTOR"][:2]
-    dupe_pair[1]["username"] = dupe_pair[0]["username"]
-    record("U1", "users", "username", "Two different user_ids share one username.",
-           [u["user_id"] for u in dupe_pair])
-    # Defect U4: missing email addresses.
-    missing_email = [u for u in users if u["role"] == "COLLECTOR"][3:5]
-    for u in missing_email:
-        u["email"] = ""
-    record("U2", "users", "email", "Active users with no email address on file.",
-           [u["user_id"] for u in missing_email])
     return users
 
 
@@ -437,8 +534,8 @@ def make_line_number():
     return 100 if n == 1212 else n
 
 
-def format_phone(state, fmt):
-    digits = f"{pick(AREA_CODES[state])}555{make_line_number():04d}"
+def phone_in_format(digits, fmt=PHONE_FORMATS[0]):
+    """Ten digits written the way fmt says. The first format is the one a clean file uses."""
     if fmt == "##########":
         return digits
     if fmt == "(###) ###-####":
@@ -447,13 +544,17 @@ def format_phone(state, fmt):
     return f"{digits[:3]}{sep}{digits[3:6]}{sep}{digits[6:]}"
 
 
+def format_phone(state):
+    return phone_in_format(f"{pick(AREA_CODES[state])}555{make_line_number():04d}")
+
+
 # Group numbers the IRS uses for ITINs, which also begin with a 9. Avoiding them
 # means a 9xx number here cannot collide with a real taxpayer identifier either.
 ITIN_GROUPS = set(range(50, 66)) | set(range(70, 89)) | set(range(90, 93)) | set(range(94, 100))
 SAFE_9XX_GROUPS = [g for g in range(1, 100) if g not in ITIN_GROUPS]
 
 
-def make_ssn(dashes=True):
+def make_ssn():
     """
     An SSN that looks real but cannot be one.
 
@@ -477,7 +578,31 @@ def make_ssn(dashes=True):
         a, g, s = rnd.choice([rnd.randint(100, 665), rnd.randint(667, 899)]), 0, rnd.randint(1, 9999)
     else:
         a, g, s = rnd.choice([rnd.randint(100, 665), rnd.randint(667, 899)]), rnd.randint(1, 99), 0
-    return f"{a:03d}-{g:02d}-{s:04d}" if dashes else f"{a:03d}{g:02d}{s:04d}"
+    return f"{a:03d}-{g:02d}-{s:04d}"
+
+
+# Values defect A11 plants as junk. make_ssn can land on them by chance, and a clean set
+# should never hold something the defect catalog would call a placeholder.
+SSN_PLACEHOLDERS = {"000-00-0000", "666-66-6666", "987-65-4321", "999-99-9999"}
+
+
+def new_ssn(used):
+    """An SSN that no earlier account holds. The serial-0000 variant has few enough values
+    that two accounts would otherwise land on the same one by chance."""
+    while True:
+        ssn = make_ssn()
+        if ssn not in used and ssn not in SSN_PLACEHOLDERS:
+            used.add(ssn)
+            return ssn
+
+
+def new_account_number(client, used):
+    """The creditor's own reference, unique within that creditor."""
+    while True:
+        number = client["_prefix"] + "".join(str(rnd.randint(0, 9)) for _ in range(client["_digits"]))
+        if (client["client_id"], number) not in used:
+            used.add((client["client_id"], number))
+            return number
 
 
 def make_address(state):
@@ -641,6 +766,7 @@ def build_accounts(clients, users):
     active_collectors = [u["user_id"] for u in collectors if u["user_status"] == "ACTIVE"]
     client_pool = [(c, c["_weight"]) for c in clients]
     accounts = []
+    used_ssns, used_numbers = set(), set()
 
     for n in range(ACCOUNT_COUNT):
         acct_id = 500001 + n
@@ -670,9 +796,7 @@ def build_accounts(clients, users):
         last = pick(LAST_NAMES)
         city, state, zip5 = pick(CITIES)
         line1, line2 = make_address(state)
-        fmt = client["_phone_format"]
         dob = rand_date(date(1945, 1, 1), date(2005, 12, 31))
-        dob_str = dob.strftime("%m/%d/%Y") if client["_dob_us_format"] else iso(dob)
         consumer_age = (TODAY - dob).days / 365.25
 
         # Contact data exactly as the client sent it. Nothing has been skip traced or
@@ -682,29 +806,12 @@ def build_accounts(clients, users):
         address_status = weighted([("VERIFIED", 0.55), ("UNVERIFIED", 0.26),
                                    ("BAD", 0.12), ("NONE", 0.07)])
         if address_status == "NONE":
-            # Clients express "we have no address" in several different ways.
-            shape = weighted([("blank", 0.42), ("literal", 0.24), ("city_only", 0.16),
-                              ("po_box", 0.10), ("no_state", 0.08)])
-            if shape == "blank":
-                line1 = line2 = ""
-                city, zip5 = "", ""
-            elif shape == "literal":
-                line1 = pick(["UNKNOWN", "ADDRESS UNKNOWN", "NO ADDRESS ON FILE", "."])
-                line2 = ""
-            elif shape == "city_only":
-                line1 = line2 = ""
-                zip5 = ""
-            elif shape == "po_box":
-                line1 = f"PO Box {rnd.randint(10, 9999)}"
-                line2 = city = ""
-            else:
-                line1 = line2 = ""
-                state_out = ""
-                city, zip5 = "", ""
+            # The client sent nothing, so every address field is blank.
+            line1 = line2 = city = zip5 = state_out = ""
 
-        phone_home = format_phone(state, fmt) if chance(0.55) else ""
-        phone_cell = format_phone(state, fmt) if chance(0.82) else ""
-        phone_work = format_phone(state, fmt) if chance(0.21) else ""
+        phone_home = format_phone(state) if chance(0.55) else ""
+        phone_cell = format_phone(state) if chance(0.82) else ""
+        phone_work = format_phone(state) if chance(0.21) else ""
         if phone_home or phone_cell or phone_work:
             phone_status = weighted([("VERIFIED", 0.40), ("UNVERIFIED", 0.34), ("BAD", 0.11),
                                      ("DISCONNECTED", 0.10), ("WRONG_NUMBER", 0.05)])
@@ -777,8 +884,7 @@ def build_accounts(clients, users):
         acct = {
             "account_id": acct_id,
             "client_id": client["client_id"],
-            "client_account_number": (client["_prefix"] +
-                                      "".join(str(rnd.randint(0, 9)) for _ in range(client["_digits"]))),
+            "client_account_number": new_account_number(client, used_numbers),
             "original_creditor": client["client_name"],
             "product_type": product,
             "portfolio_batch": f"{placement.year}-{placement.month:02d}-{client['client_code']}",
@@ -803,8 +909,8 @@ def build_accounts(clients, users):
             "middle_initial": pick(MIDDLE_INITIALS) if chance(0.55) else "",
             "last_name": last,
             "name_suffix": pick(SUFFIXES) if chance(0.04) else "",
-            "ssn": make_ssn(client["_ssn_dashes"]) if chance(0.93) else "",
-            "date_of_birth": dob_str if chance(0.96) else "",
+            "ssn": new_ssn(used_ssns) if chance(0.93) else "",
+            "date_of_birth": iso(dob) if chance(0.96) else "",
             "address_line1": line1, "address_line2": line2,
             "city": city, "state": state_out, "zip_code": zip5,
             "address_status": address_status, "phone_status": phone_status,
@@ -821,7 +927,7 @@ def build_accounts(clients, users):
             "client_last_payment_amount": money(client_paid_amount) if client_paid_date else "",
             "_client": client, "_placement": placement, "_closed_date": closed_date,
             "_status_date": status_date, "_placement_bal": placement_bal, "_age_days": age_days,
-            "_phone_fmt": fmt, "_p_ever": p_ever, "_paid_any": paid_any, "_resolved": resolved,
+            "_p_ever": p_ever, "_paid_any": paid_any, "_resolved": resolved,
             "_settled": settled, "_paid_frac": paid_frac, "_debt_age_days": debt_age_days,
         }
 
@@ -927,15 +1033,17 @@ def build_money(accounts, users):
     payments, arrangements = [], []
     pay_id, arr_id = 9000001, 700001
 
-    # Pick the settlements that will be approved below the client's floor.
+    # Pick the settlements that will be approved below the client's floor. The choice
+    # comes from the defect stream, so the clean data around it is the same either way.
     settled = [a for a in accounts if a["account_status"] == "SETTLED_IN_FULL"]
-    rnd.shuffle(settled)
-    for a in settled[:20]:
+    with defect_stream():
+        under = take(settled, quota("A27"))
+    for a in under:
         a["_under_settle"] = True
     record("A27", "accounts", "total_paid, adjustment_amount",
            "Settlements accepted for less than the client's contractual min_settlement_pct. The account "
            "was closed as SETTLED_IN_FULL and the rest of the balance waived without authority.",
-           [a["account_id"] for a in settled[:20]],
+           [a["account_id"] for a in under],
            "Easiest to see as payment_arrangements.settlement_pct below clients.min_settlement_pct; "
            "otherwise compare total_paid against placement_balance + interest + fees.")
 
@@ -948,7 +1056,7 @@ def build_money(accounts, users):
         interest = round(acct["_placement_bal"] * (float(client["interest_rate_pct"]) / 100.0)
                          * min(years, 3.0), 2) if client["_interest"] else 0.0
         fees = round(acct["_placement_bal"] * rnd.uniform(0.05, 0.18), 2) if client["_fee"] else 0.0
-        if acct["account_status"] == "LEGAL" and chance(0.6):
+        if acct["account_status"] == "LEGAL" and client["_fee"] and chance(0.6):
             fees = round(fees + rnd.choice([65.0, 95.0, 125.0, 210.0]), 2)   # court costs
         acct["_total_due"] = round(acct["_placement_bal"] + interest + fees, 2)
 
@@ -1156,6 +1264,8 @@ DIAL_RESULTS = [
     ("RPC", 0.18, None),
 ]
 
+DIAL_TEXT = {result: text for result, _, text in DIAL_RESULTS if text}
+
 RPC_OUTCOMES = [
     ("PROMISE_TO_PAY", 0.15,
      "RPC with consumer, identity verified with date of birth and last four of SSN. Reviewed balance of ${bal}. "
@@ -1253,24 +1363,90 @@ def build_notes(accounts, users, writer):
 
     note_id = 4000001
     stats = {"total": 0}
-    # Pre-selected accounts that receive planted note-level defects.
-    idx = list(range(len(accounts)))
-    rnd.shuffle(idx)
-    bad_user_accts = set(idx[:40])
-    early_note_accts = set(idx[40:65])
-    odd_hour_accts = set(idx[65:185])
-    ghost_cd_accts = set(idx[185:220])
-    ghost_atty_accts = set(idx[220:245])
-    dupe_note_accts = set(idx[245:295])
-    # This one only makes sense on accounts that are genuinely closed.
-    closed_idx = [j for j, a in enumerate(accounts)
-                  if a["_closed_date"] and a["_closed_date"] < TODAY - timedelta(days=10)]
-    rnd.shuffle(closed_idx)
-    post_close_accts = set(closed_idx[:30])
-    third_party_accts = set(idx[325:340])
-    multiline_accts = set(idx[340:400])
+    # Each planted note defect is one extra note on a chosen account. The accounts
+    # are picked up front from the defect stream and the notes are added after the
+    # clean ones, so the clean notes are the same with and without --defects.
+    def has_phone(a):
+        return bool(a["phone_cell"] or a["phone_home"] or a["phone_work"])
 
+    def closed_a_while(a):
+        return bool(a["_closed_date"] and a["_closed_date"] < TODAY - timedelta(days=10))
+
+    eligibility = {"N1": has_phone, "N2": None, "N3": has_phone, "N4a": None, "N4b": None,
+                   "N5": None, "N6": None, "N7": closed_a_while, "N8": has_phone}
+    note_defects = any(quota(code) for code in eligibility)
+    chosen = {}
+    with defect_stream():
+        for code, eligible in eligibility.items():
+            chosen[code] = set(take(range(len(accounts)), quota(code),
+                                    None if eligible is None else (lambda j, e=eligible: e(accounts[j]))))
+
+    # Planted notes are written after every clean one, so no clean note_id ever shifts.
+    extra = []
     planted = {k: [] for k in ("N1", "N2", "N3", "N4a", "N4b", "N5", "N7", "N8", "N6", "A31")}
+
+    def plant_note_defects(i, acct, events, add, phones, window):
+        """Add this account's planted notes. Runs on the defect stream."""
+        placement = acct["_placement"]
+        aid = acct["account_id"]
+        if i in chosen["N1"]:
+            add(rnd.randint(1, window), (8, 20), 9999, "OUTBOUND_CALL", "DIAL", "NO_ANSWER",
+                DIAL_TEXT["NO_ANSWER"].format(phone=phones[0]), phones[0])
+            planted["N1"].append(aid)
+        if i in chosen["N2"]:
+            when = business_dt(placement - timedelta(days=rnd.randint(3, 40)))
+            events.append([when, pick(collector_ids), "OUTBOUND_CALL", "DIAL", "NO_ANSWER",
+                           phones[0] if phones else "", "", "N",
+                           "Dialed number on file. No answer."])
+            planted["N2"].append(aid)
+        if i in chosen["N3"]:
+            add(rnd.randint(1, window), pick([(5, 7), (21, 23)]), pick(collector_ids),
+                "OUTBOUND_CALL", "DIAL", "NO_ANSWER",
+                DIAL_TEXT["NO_ANSWER"].format(phone=phones[0]), phones[0])
+            planted["N3"].append(aid)
+        # N4a/N4b: the note documents a contact restriction that the account flags
+        # never picked up, so the consumer keeps getting worked.
+        if i in chosen["N4a"]:
+            add(rnd.randint(1, window), (8, 19), pick(collector_ids), "OUTBOUND_CALL", "DIAL", "CEASE_DESIST",
+                "RPC with consumer. Consumer stated, \"stop calling me, I do not want to hear from "
+                "you people again, put it in writing.\" Cease and desist request documented.",
+                phones[0] if phones else "")
+            acct["cease_desist_flag"] = "N"
+            acct["do_not_call_flag"] = "N"
+            planted["N4a"].append(aid)
+        if i in chosen["N4b"]:
+            add(rnd.randint(1, window), (8, 19), pick(collector_ids), "OUTBOUND_CALL", "DIAL", "ATTORNEY_REP",
+                f"RPC with consumer. Consumer advises they are represented by counsel, "
+                f"{pick(LAST_NAMES)} & {pick(LAST_NAMES)} LLP, on this debt and asked that all "
+                f"further contact go through the firm. Ended the call.",
+                phones[0] if phones else "")
+            acct["attorney_represented_flag"] = "N"
+            acct["attorney_name"] = ""
+            planted["N4b"].append(aid)
+        # N6: free-text notes containing embedded newlines and quotes.
+        if i in chosen["N6"]:
+            day = rnd.randint(1, window)
+            add(day, (8, 19), pick(collector_ids), "INBOUND_CALL", "DIAL", "RPC",
+                pick(MULTILINE_NOTES).format(
+                    fdate=iso(placement + timedelta(days=min(window, day + 10))),
+                    inc=rnd.randint(1400, 4200), rent=rnd.randint(600, 2200),
+                    amt=rnd.choice([25, 40, 50, 75, 100])))
+            planted["N6"].append(aid)
+        # N7: collection activity logged after the account was closed.
+        if i in chosen["N7"]:
+            after = min(TODAY, acct["_closed_date"] + timedelta(days=rnd.randint(5, 60)))
+            phone = phones[0] if phones else "no number on file"
+            events.append([business_dt(after), pick(collector_ids), "OUTBOUND_CALL", "DIAL", "LEFT_MESSAGE",
+                           phone, "", "N",
+                           f"Dialed {phone}. Left message requesting a return call regarding the balance."])
+            planted["N7"].append(aid)
+        # N8: the balance and creditor were revealed to someone other than the consumer.
+        if i in chosen["N8"]:
+            add(rnd.randint(1, window), (8, 20), pick(collector_ids), "OUTBOUND_CALL", "DIAL", "TPC",
+                f"Dialed {phones[0]}. Spoke with {pick(RELATIONS)} and advised we were calling to collect "
+                f"a past due balance of ${acct['placement_balance']} owed to {acct['original_creditor']}. "
+                f"Asked them to pass the message along.", phones[0])
+            planted["N8"].append(aid)
 
     for i, acct in enumerate(accounts):
         placement = acct["_placement"]
@@ -1305,16 +1481,10 @@ def build_notes(accounts, users, writer):
             day = rnd.randint(1, window)
             roll = rnd.random()
             user = pick(collector_ids)
-            if i in bad_user_accts and chance(0.25):
-                user = 9999                       # defect N1: unknown user_id
-                planted["N1"].append(acct["account_id"])
-            elif chance(0.10) and terminated_ids:
+            if chance(0.10) and terminated_ids:
                 user = pick(terminated_ids)
 
             hours = (8, 20)
-            if i in odd_hour_accts and chance(0.35):
-                hours = pick([(5, 7), (21, 23)])   # defect N3: outside 8am-9pm
-                planted["N3"].append(acct["account_id"])
 
             if roll < 0.62 and phones:
                 phone = pick(phones)
@@ -1353,11 +1523,6 @@ def build_notes(accounts, users, writer):
                 else:
                     template = next(t for r, _, t in DIAL_RESULTS if r == result)
                     text = template.format(phone=phone, relation=pick(RELATIONS))
-                    if result == "TPC" and i in third_party_accts:
-                        text = (f"Dialed {phone}. Spoke with {pick(RELATIONS)} and advised we were calling to collect "
-                                f"a past due balance of ${acct['placement_balance']} owed to {acct['original_creditor']}. "
-                                f"Asked them to pass the message along.")
-                        planted["N8"].append(acct["account_id"])
                     add(day, hours, user, "OUTBOUND_CALL", "DIAL", result, text, phone)
             elif roll < 0.72:
                 # The validation notice goes out once, at placement; later letters are follow-ups.
@@ -1388,38 +1553,6 @@ def build_notes(accounts, users, writer):
                 add(day, (8, 19), user, "INBOUND_CALL", "DIAL", "RPC",
                     f"Inbound call from consumer. Verified identity and answered questions about the "
                     f"balance of ${acct['placement_balance']}. No commitment obtained.")
-
-        # Defects N4a/N4b: the note documents a contact restriction that the account
-        # flags never picked up, so the consumer keeps getting worked.
-        if i in ghost_cd_accts:
-            day = rnd.randint(1, window)
-            add(day, (8, 19), pick(collector_ids), "OUTBOUND_CALL", "DIAL", "CEASE_DESIST",
-                "RPC with consumer. Consumer stated, \"stop calling me, I do not want to hear from "
-                "you people again, put it in writing.\" Cease and desist request documented.",
-                phones[0] if phones else "")
-            acct["cease_desist_flag"] = "N"
-            acct["do_not_call_flag"] = "N"
-            planted["N4a"].append(acct["account_id"])
-        if i in ghost_atty_accts:
-            day = rnd.randint(1, window)
-            add(day, (8, 19), pick(collector_ids), "OUTBOUND_CALL", "DIAL", "ATTORNEY_REP",
-                f"RPC with consumer. Consumer advises they are represented by counsel, "
-                f"{pick(LAST_NAMES)} & {pick(LAST_NAMES)} LLP, on this debt and asked that all "
-                f"further contact go through the firm. Ended the call.",
-                phones[0] if phones else "")
-            acct["attorney_represented_flag"] = "N"
-            acct["attorney_name"] = ""
-            planted["N4b"].append(acct["account_id"])
-
-        # Defect N6: free-text notes containing embedded newlines and quotes.
-        if i in multiline_accts:
-            day = rnd.randint(1, window)
-            add(day, (8, 19), pick(collector_ids), "INBOUND_CALL", "DIAL", "RPC",
-                pick(MULTILINE_NOTES).format(
-                    fdate=iso(placement + timedelta(days=min(window, day + 10))),
-                    inc=rnd.randint(1400, 4200), rent=rnd.randint(600, 2200),
-                    amt=rnd.choice([25, 40, 50, 75, 100])))
-            planted["N6"].append(acct["account_id"])
 
         # --- payment notes -------------------------------------------------
         for p in acct["_payments"]:
@@ -1465,32 +1598,18 @@ def build_notes(accounts, users, writer):
             add(window, (6, 20), SYSTEM_USER, "SYSTEM", "STATUS_CHANGE", "ACCOUNT_CLOSED",
                 f"Account closed. Status set to {acct['account_status']}. Reason: {acct['close_reason']}.", system="Y")
 
-        # Defect N7: collection activity logged after the account was closed.
-        if i in post_close_accts and acct["_closed_date"] and acct["_closed_date"] < TODAY - timedelta(days=10):
-            after = acct["_closed_date"] + timedelta(days=rnd.randint(5, 60))
-            if after > TODAY:
-                after = TODAY
-            when = business_dt(after)
-            phone = phones[0] if phones else "no number on file"
-            events.append([when, pick(collector_ids), "OUTBOUND_CALL", "DIAL", "LEFT_MESSAGE",
-                           phone, "", "N",
-                           f"Dialed {phone}. Left message requesting a return call regarding the balance."])
-            planted["N7"].append(acct["account_id"])
-
-        # Defect N2: notes dated before the account was placed.
-        if i in early_note_accts:
-            when = business_dt(placement - timedelta(days=rnd.randint(3, 40)))
-            events.append([when, pick(collector_ids), "OUTBOUND_CALL", "DIAL", "NO_ANSWER",
-                           phones[0] if phones else "", "", "N",
-                           "Dialed number on file. No answer."])
-            planted["N2"].append(acct["account_id"])
+        if note_defects:
+            with defect_stream():
+                before = len(events)
+                plant_note_defects(i, acct, events, add, phones, window)
+                extra.extend((acct["account_id"], ev) for ev in events[before:])
+                del events[before:]
 
         events.sort(key=lambda e: e[0])
 
         # Defect N5: the interface double-posted a note.
-        if i in dupe_note_accts and len(events) > 4:
-            dup = list(events[3])
-            events.insert(4, dup)
+        if i in chosen["N5"] and len(events) > 4:
+            extra.append((acct["account_id"], list(events[3])))
             planted["N5"].append(acct["account_id"])
 
         if acct["phone_status"] in ("WRONG_NUMBER", "DISCONNECTED"):
@@ -1505,13 +1624,21 @@ def build_notes(accounts, users, writer):
             note_id += 1
             stats["total"] += 1
 
+    extra.sort(key=lambda t: (t[0], t[1][0]))
+    for account_id, ev in extra:
+        when, user, contact, action, result, phone, follow, system, text = ev
+        writer.writerow([note_id, account_id, ts(when), user, contact, action,
+                         result, phone, follow, system, text])
+        note_id += 1
+        stats["total"] += 1
+
     wasted = sorted(planted["A31"], key=lambda t: -t[1])
     record("A31", "accounts", "phone_status",
            "Accounts whose phone the client already flagged as disconnected or a wrong number, "
            "dialed six or more times anyway. Wasted dialer capacity at best, and continuing to "
            "call a number known to belong to someone else is an FDCPA problem.",
            [a for a, _ in wasted],
-           f"Worst case here was {wasted[0][1]} outbound calls on one account." if wasted else "")
+           f"Worst case here was {wasted[0][1]} outbound calls on one account." if wasted else "", defect=False)
     record("N1", "notes", "user_id", "Notes written by user_id 9999, which does not exist in users.csv.",
            sorted(set(planted["N1"])), "Left join notes to users on user_id.")
     record("N2", "notes", "note_datetime",
@@ -1542,39 +1669,99 @@ def build_notes(accounts, users, writer):
 
 
 # --------------------------------------------------------------------------
-# Deliberate defects in accounts, payments and arrangements
+# Real conditions that are not defects
 # --------------------------------------------------------------------------
+
+def link_consumers(accounts):
+    """Give some consumers several accounts across clients, as real portfolios have."""
+    anchors = take(accounts, max(1, round(len(accounts) * 0.003)), lambda a: a["ssn"])
+    for anchor in anchors:
+        others = take(accounts, rnd.randint(2, 4), lambda a, anc=anchor: a["account_id"] != anc["account_id"])
+        for o in others:
+            for field in ("first_name", "last_name", "ssn", "date_of_birth", "address_line1",
+                          "city", "state", "zip_code", "phone_cell"):
+                o[field] = anchor[field]
+    record("A26", "accounts", "ssn, last_name",
+           f"{len(anchors)} consumers hold multiple accounts across different clients. "
+           "The set rewards recognizing this before deduplicating.",
+           [a["account_id"] for a in anchors],
+           "Distinguish these from the true duplicates in A15.", defect=False)
+
+
+def note_address_gaps(accounts):
+    """Record the accounts with no usable address. Runs last, once everything else has settled,
+    because other steps copy whole identities from one account to another."""
+    incomplete = [a["account_id"] for a in accounts
+                  if not (a["address_line1"].strip() and a["city"].strip()
+                          and a["state"].strip() and a["zip_code"].strip())]
+    record("A1", "accounts", "address_line1, city, state, zip_code, address_status",
+           "Accounts with an incomplete address, nearly all of them accounts the client sent no address for "
+           "(address_status NONE). Without defects each is blank in all four address fields; defect A32 "
+           "writes some of them other ways.",
+           incomplete,
+           "Real signal, not noise. These liquidate materially worse, so treat address_status NONE as a "
+           "feature rather than a row to drop.", defect=False)
+
+
+# --------------------------------------------------------------------------
+# Deliberate defects, planted only when --defects asks for them
+# --------------------------------------------------------------------------
+
+def corrupt_clients(clients):
+    targets = take(clients, quota("C2"))
+    for c in targets:
+        c["contract_end_date"] = iso(TODAY - timedelta(days=rnd.randint(200, 900)))
+        c["client_status"] = "INACTIVE"
+    record("C2", "clients", "contract_end_date, client_status",
+           "Client contract ended well before today, but accounts were placed under it afterward.",
+           [c["client_id"] for c in targets],
+           "Join accounts.placement_date against clients.contract_end_date.")
+    targets = take(clients, quota("C3"))
+    for c in targets:
+        c["contact_email"] = ""
+    record("C3", "clients", "contact_email", "Client record missing a contact email.",
+           [c["client_id"] for c in targets])
+
+
+def corrupt_users(users):
+    pool = [u for u in users if u["role"] == "COLLECTOR"]
+    rnd.shuffle(pool)
+    pairs = []
+    for _ in range(min(quota("U1"), len(pool) // 2)):
+        first, second = pool.pop(), pool.pop()
+        second["username"] = first["username"]
+        pairs.append(f"{first['user_id']}/{second['user_id']}")
+    record("U1", "users", "username", "Two different user_ids share one username.", pairs,
+           "Sample values are id pairs.")
+    targets = pool[:quota("U2")]
+    for u in targets:
+        u["email"] = ""
+    record("U2", "users", "email", "Users with no email address on file.",
+           [u["user_id"] for u in targets])
+
+
+def plant_defects(clients, users, accounts, payments, arrangements):
+    """Damage the clean data set. Everything here draws from the defect stream."""
+    with defect_stream():
+        corrupt_clients(clients)
+        corrupt_users(users)
+        corrupt_accounts(accounts, users, clients)
+        corrupt_payments(payments, accounts)
+        corrupt_arrangements(arrangements, accounts)
+
 
 def corrupt_accounts(accounts, users, clients):
     n = len(accounts)
     valid_user_ids = {u["user_id"] for u in users}
     terminated = [u["user_id"] for u in users if u["user_status"] == "TERMINATED"]
 
-    def sample(k, predicate=None, exclude=None):
-        pool = [a for a in accounts if (predicate is None or predicate(a))
-                and (exclude is None or a["account_id"] not in exclude)]
-        rnd.shuffle(pool)
-        return pool[:k]
+    def sample(k, predicate=None):
+        return take(accounts, k, predicate)
 
     used = set()
 
-    # A1 -- addresses the client never provided. This is not corruption; it is what
-    # arrived, which is why address_status carries NONE and why these accounts
-    # genuinely liquidate worse. The trap is that "no address" is written several
-    # different ways, so any count of it has to normalize first.
-    targets = [a for a in accounts if a["address_status"] == "NONE"]
-    record("A1", "accounts", "address_line1, city, state, zip_code, address_status",
-           "Accounts placed with no usable address. Written five different ways: every field "
-           "blank, a literal 'UNKNOWN' in address_line1, a city and state with no street, a PO "
-           "box with no city, and a street with no state.",
-           [a["account_id"] for a in targets],
-           "Real signal, not noise. These liquidate materially worse, so treat address_status "
-           "NONE as a feature rather than a row to drop.")
-
     # A2 -- ZIP codes that lost their leading zero somewhere upstream.
-    ne = [a for a in accounts if a["zip_code"].startswith("0")]
-    rnd.shuffle(ne)
-    targets = ne[:int(len(ne) * 0.45)]
+    targets = sample(quota("A2"), lambda a: a["zip_code"].startswith("0"))
     for a in targets:
         a["zip_code"] = a["zip_code"].lstrip("0")
     record("A2", "accounts", "zip_code",
@@ -1583,7 +1770,7 @@ def corrupt_accounts(accounts, users, clients):
            "Classic spreadsheet round-trip damage. Look for zip_code shorter than 5 characters.")
 
     # A3 -- state and ZIP that do not belong together.
-    targets = sample(35, lambda a: a["zip_code"] and a["state"])
+    targets = sample(quota("A3"), lambda a: a["zip_code"] and a["state"])
     for a in targets:
         other = pick([c for c in CITIES if c[1] != a["state"]])
         a["zip_code"] = other[2]
@@ -1591,7 +1778,7 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A4 -- balance grew on a client that charges neither interest nor fees.
-    targets = sample(40, lambda a: not a["_client"]["_interest"] and not a["_client"]["_fee"]
+    targets = sample(quota("A4"), lambda a: not a["_client"]["_interest"] and not a["_client"]["_fee"]
                      and a["account_status"] not in ("PAID_IN_FULL", "SETTLED_IN_FULL"))
     for a in targets:
         a["current_balance"] = money(round(float(a["placement_balance"]) * rnd.uniform(1.15, 1.9), 2))
@@ -1601,7 +1788,7 @@ def corrupt_accounts(accounts, users, clients):
            "Join accounts to clients on client_id and compare against allows_interest / allows_fees.")
 
     # A5 -- closed-paid accounts still carrying a balance.
-    targets = sample(25, lambda a: a["account_status"] in ("PAID_IN_FULL", "SETTLED_IN_FULL"))
+    targets = sample(quota("A5"), lambda a: a["account_status"] in ("PAID_IN_FULL", "SETTLED_IN_FULL"))
     for a in targets:
         a["current_balance"] = money(round(rnd.uniform(15, 850), 2))
     record("A5", "accounts", "account_status, current_balance",
@@ -1609,14 +1796,14 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A6 -- overpayments left as negative balances.
-    targets = sample(12, lambda a: float(a["total_paid"]) > 0)
+    targets = sample(quota("A6"), lambda a: float(a["total_paid"]) > 0)
     for a in targets:
         a["current_balance"] = money(-round(rnd.uniform(5, 240), 2))
     record("A6", "accounts", "current_balance", "Negative current_balance from unrefunded overpayments.",
            [a["account_id"] for a in targets])
 
     # A7 -- bankruptcy status without the bankruptcy detail.
-    targets = sample(18, lambda a: a["account_status"] == "BANKRUPTCY")
+    targets = sample(quota("A7"), lambda a: a["account_status"] == "BANKRUPTCY")
     for a in targets:
         if chance(0.5):
             a["bankruptcy_case_number"] = ""
@@ -1631,7 +1818,7 @@ def corrupt_accounts(accounts, users, clients):
     used |= {a["account_id"] for a in targets}
 
     # A8 -- bankruptcy data on accounts that are not in bankruptcy status.
-    targets = sample(10, lambda a: a["account_status"] in ("ACTIVE", "PAYMENT_PLAN",
+    targets = sample(quota("A8"), lambda a: a["account_status"] in ("ACTIVE", "PAYMENT_PLAN",
                                                           "SKIP_TRACE", "RETURNED"))
     for a in targets:
         filed = rand_date(a["_placement"], TODAY)
@@ -1644,13 +1831,13 @@ def corrupt_accounts(accounts, users, clients):
            "The reverse of A7, and the more dangerous direction.")
 
     # A9 -- deceased data problems.
-    targets = sample(7, lambda a: a["account_status"] == "DECEASED" and a["account_id"] not in used)
+    targets = sample(quota("A9a"), lambda a: a["account_status"] == "DECEASED" and a["account_id"] not in used)
     for a in targets:
         a["deceased_date"] = ""
     record("A9a", "accounts", "deceased_date", "DECEASED accounts with no date of death recorded.",
            [a["account_id"] for a in targets])
     used |= {a["account_id"] for a in targets}
-    targets = sample(5, lambda a: a["account_status"] == "DECEASED" and a["account_id"] not in used)
+    targets = sample(quota("A9b"), lambda a: a["account_status"] == "DECEASED" and a["account_id"] not in used)
     for a in targets:
         a["deceased_date"] = iso(a["_placement"] - timedelta(days=rnd.randint(30, 900)))
     record("A9b", "accounts", "deceased_date, placement_date",
@@ -1658,28 +1845,28 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A10 -- impossible dates of birth.
-    targets = sample(8, lambda a: a["date_of_birth"])
+    targets = sample(quota("A10a"), lambda a: a["date_of_birth"])
     for a in targets:
         d = TODAY - timedelta(days=rnd.randint(2000, 6400))       # a minor
-        a["date_of_birth"] = d.strftime("%m/%d/%Y") if a["_client"]["_dob_us_format"] else iso(d)
+        a["date_of_birth"] = iso(d)
     record("A10a", "accounts", "date_of_birth", "Date of birth implies the consumer is under 18.",
            [a["account_id"] for a in targets])
-    targets = sample(6, lambda a: a["date_of_birth"])
+    targets = sample(quota("A10b"), lambda a: a["date_of_birth"])
     for a in targets:
         d = date(rnd.randint(1899, 1912), rnd.randint(1, 12), rnd.randint(1, 28))
-        a["date_of_birth"] = d.strftime("%m/%d/%Y") if a["_client"]["_dob_us_format"] else iso(d)
+        a["date_of_birth"] = iso(d)
     record("A10b", "accounts", "date_of_birth", "Date of birth implies an age over 110.",
            [a["account_id"] for a in targets])
 
     # A11 -- placeholder and malformed junk typed into the SSN field.
-    targets = sample(20, lambda a: a["ssn"])
+    targets = sample(quota("A11"), lambda a: a["ssn"])
     for a in targets:
         # Every one of these is either unissuable or the wrong shape entirely.
         # 987-65-4321 sits in the SSA advertising block, and 666 / 999 area
         # numbers have never been issued, so nothing here can belong to a person.
         bad = pick(["000-00-0000", "666-66-6666", "987-65-4321", "999-99-9999",
                     "XXX-XX-4417", "UNKNOWN", "N/A", "12345678", "555-12-34567", "0"])
-        a["ssn"] = bad if "-" in a["ssn"] or not bad.replace("-", "").isdigit() else bad.replace("-", "")
+        a["ssn"] = bad
     record("A11", "accounts", "ssn",
            "Placeholder and malformed junk in the SSN field: all zeros, repeated digits, sequential "
            "digits, masked values, free text, and values that are not nine digits.",
@@ -1688,17 +1875,17 @@ def corrupt_accounts(accounts, users, clients):
            "shape rather than by being invalid.")
 
     # A12 -- one SSN shared by consumers with different names.
-    shared = make_ssn(True)
-    targets = sample(14, lambda a: a["ssn"])
+    shared = make_ssn()
+    targets = sample(quota("A12") if quota("A12") > 1 else 0, lambda a: a["ssn"])
     for a in targets:
-        a["ssn"] = shared if "-" in a["ssn"] else shared.replace("-", "")
+        a["ssn"] = shared
     record("A12", "accounts", "ssn",
-           f"Fourteen accounts with different consumer names share a single SSN ({shared}).",
+           f"{len(targets)} accounts with different consumer names share a single SSN ({shared}).",
            [a["account_id"] for a in targets],
            "Group by ssn and count distinct last_name.")
 
     # A13 -- unusable phone numbers.
-    targets = sample(60, lambda a: a["phone_cell"] or a["phone_home"])
+    targets = sample(quota("A13"), lambda a: a["phone_cell"] or a["phone_home"])
     for a in targets:
         bad = pick(["0000000000", "999-999-9999", "555-1234", "(000) 000-0000", "1234567",
                     "NONE", "no phone", "111-111-1111"])
@@ -1707,13 +1894,12 @@ def corrupt_accounts(accounts, users, clients):
         else:
             a["phone_home"] = bad
     record("A13", "accounts", "phone_home, phone_cell",
-           "Placeholder or malformed phone numbers, plus four different phone formats across the file "
-           "depending on which client sent the account.",
+           "Placeholder or malformed phone numbers in place of a real one.",
            [a["account_id"] for a in targets],
-           "The formatting inconsistency is by client_id; the junk values are scattered.")
+           "The junk values are scattered. Mixed phone formats are a separate defect, A33.")
 
     # A14 -- unusable email addresses.
-    targets = sample(90, lambda a: a["email"])
+    targets = sample(quota("A14"), lambda a: a["email"])
     for a in targets:
         a["email"] = pick(["none", "N/A", "no email", "notanemail.com", "consumer@", "@gmail.com",
                            "test@test", "unknown@unknown.com", "x@x.x", "NULL"])
@@ -1721,8 +1907,9 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A15 -- the same debt placed twice under two account_ids.
-    sources = sample(22, lambda a: a["account_status"] not in CLOSED_SET)
-    dupes = sample(22, lambda a: a["account_id"] not in {s["account_id"] for s in sources})
+    sources = sample(quota("A15"), lambda a: a["account_status"] not in CLOSED_SET)
+    source_ids = {s["account_id"] for s in sources}
+    dupes = sample(len(sources), lambda a: a["account_id"] not in source_ids)
     pairs = []
     for src, dst in zip(sources, dupes):
         for field in ("client_id", "client_account_number", "original_creditor", "product_type",
@@ -1740,14 +1927,14 @@ def corrupt_accounts(accounts, users, clients):
            "Group by client_id + client_account_number having count > 1. Sample values are id pairs.")
 
     # A16 -- assignment pointing at staff who cannot work the account.
-    targets = sample(120, lambda a: a["account_status"] not in CLOSED_SET)
+    targets = sample(quota("A16a"), lambda a: a["account_status"] not in CLOSED_SET)
     for a in targets:
         a["assigned_user_id"] = str(pick(terminated))
     record("A16a", "accounts", "assigned_user_id",
            "Open accounts assigned to users whose user_status is TERMINATED.",
            [a["account_id"] for a in targets],
            "Join accounts to users on assigned_user_id and filter on user_status.")
-    targets = sample(9)
+    targets = sample(quota("A16b"))
     for a in targets:
         a["assigned_user_id"] = str(rnd.choice([7777, 8888, 9999, 0]))
     record("A16b", "accounts", "assigned_user_id",
@@ -1755,14 +1942,14 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A17 -- orphaned client references.
-    targets = sample(4)
+    targets = sample(quota("A17"))
     for a in targets:
         a["client_id"] = pick([199, 250, 888])
     record("A17", "accounts", "client_id", "client_id values with no matching row in clients.csv.",
            [a["account_id"] for a in targets])
 
     # A18 -- inconsistent name hygiene.
-    targets = sample(140)
+    targets = sample(quota("A18"))
     for a in targets:
         mode = weighted([("upper", 0.35), ("pad", 0.25), ("suffix_in_last", 0.15),
                          ("lower", 0.15), ("punct", 0.10)])
@@ -1784,13 +1971,13 @@ def corrupt_accounts(accounts, users, clients):
            "into last_name, stray punctuation.", [a["account_id"] for a in targets])
 
     # A19 -- date sequences that cannot have happened.
-    targets = sample(15)
+    targets = sample(quota("A19a"))
     for a in targets:
         a["charge_off_date"] = iso(a["_placement"] + timedelta(days=rnd.randint(10, 200)))
     record("A19a", "accounts", "charge_off_date, placement_date",
            "charge_off_date falls after placement_date; an account cannot be placed before it charges off.",
            [a["account_id"] for a in targets])
-    targets = sample(10)
+    targets = sample(quota("A19b"))
     for a in targets:
         a["date_of_first_delinquency"] = iso(date.fromisoformat(a["charge_off_date"]) + timedelta(days=rnd.randint(5, 90)))
     record("A19b", "accounts", "date_of_first_delinquency, charge_off_date",
@@ -1798,7 +1985,7 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A20 -- payment summary fields that disagree with payments.csv.
-    targets = sample(30, lambda a: not a["_payments"])
+    targets = sample(quota("A20a"), lambda a: not a["_payments"])
     for a in targets:
         a["last_payment_date"] = iso(rand_date(a["_placement"], TODAY))
         a["last_payment_amount"] = money(round(rnd.uniform(25, 400), 2))
@@ -1806,7 +1993,7 @@ def corrupt_accounts(accounts, users, clients):
            "Accounts showing a last payment when payments.csv holds no payment for them at all.",
            [a["account_id"] for a in targets],
            "The single most useful cross-file reconciliation in the set.")
-    targets = sample(50, lambda a: a["_payments"] and float(a["total_paid"]) > 0)
+    targets = sample(quota("A20b"), lambda a: a["_payments"] and float(a["total_paid"]) > 0)
     for a in targets:
         a["total_paid"] = money(round(float(a["total_paid"]) * rnd.choice([0.5, 0.75, 1.3, 1.6]), 2))
     record("A20b", "accounts", "total_paid",
@@ -1814,7 +2001,7 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A21 -- currency formatting leaking into numeric columns.
-    targets = sample(12)
+    targets = sample(quota("A21"))
     for a in targets:
         for col in ("current_balance", "placement_balance"):
             v = float(a[col].replace("$", "").replace(",", "") or 0)
@@ -1825,14 +2012,14 @@ def corrupt_accounts(accounts, users, clients):
            "Whoever loads the file naively will get a type error or silent string sort here.")
 
     # A22 -- status_date earlier than placement_date.
-    targets = sample(9)
+    targets = sample(quota("A22"))
     for a in targets:
         a["status_date"] = iso(a["_placement"] - timedelta(days=rnd.randint(5, 60)))
     record("A22", "accounts", "status_date, placement_date",
            "status_date precedes placement_date.", [a["account_id"] for a in targets])
 
     # A23 -- closed accounts still queued for work.
-    targets = sample(40, lambda a: a["account_status"] in CLOSED_SET)
+    targets = sample(quota("A23"), lambda a: a["account_status"] in CLOSED_SET)
     for a in targets:
         a["next_action_date"] = iso(TODAY + timedelta(days=rnd.randint(1, 40)))
     record("A23", "accounts", "next_action_date, account_status",
@@ -1840,7 +2027,7 @@ def corrupt_accounts(accounts, users, clients):
            [a["account_id"] for a in targets])
 
     # A24 -- inconsistent representations of "no value".
-    targets = sample(70)
+    targets = sample(quota("A24"))
     for a in targets:
         col = pick(["employer_name", "address_line2", "middle_initial", "phone_work", "email"])
         a[col] = pick(["NULL", "N/A", "n/a", "-", "UNKNOWN", "none"])
@@ -1850,14 +2037,14 @@ def corrupt_accounts(accounts, users, clients):
            "Anything counting nulls will undercount unless these are normalized first.")
 
     # A25 -- state codes that are not states.
-    targets = sample(6, lambda a: a["state"])
+    targets = sample(quota("A25"), lambda a: a["state"])
     for a in targets:
         a["state"] = pick(["XX", "ZZ", "US", "N/A", "  ", "Ca"])
     record("A25", "accounts", "state", "Invalid or non-standard state codes.",
            [a["account_id"] for a in targets])
 
     # A28 -- settlements booked against clients whose contract forbids settling.
-    targets = sample(15, lambda a: a["_client"]["allows_settlement"] == "N"
+    targets = sample(quota("A28"), lambda a: a["_client"]["allows_settlement"] == "N"
                      and a["account_status"] == "PAID_IN_FULL")
     for a in targets:
         a["account_status"] = "SETTLED_IN_FULL"
@@ -1869,10 +2056,11 @@ def corrupt_accounts(accounts, users, clients):
            "Join accounts to clients and check account_status against allows_settlement.")
 
     # A29 -- the status_class rollup was never refreshed when the status moved on.
-    stale_closed = sample(22, lambda a: a["account_status"] in CLOSED_SET)
+    stale_open_count = round(quota("A29") * 8 / 30)
+    stale_closed = sample(quota("A29") - stale_open_count, lambda a: a["account_status"] in CLOSED_SET)
     for a in stale_closed:
         a["status_class"] = pick(["OPEN", "OPEN", "PTP"])
-    stale_open = sample(8, lambda a: a["account_status"] not in CLOSED_SET)
+    stale_open = sample(stale_open_count, lambda a: a["account_status"] not in CLOSED_SET)
     for a in stale_open:
         a["status_class"] = "CLOSED"
     record("A29", "accounts", "status_class, account_status",
@@ -1884,7 +2072,7 @@ def corrupt_accounts(accounts, users, clients):
            "compare, rather than trusting the stored value.")
 
     # A30 -- the consumer paid the creditor directly after the account was placed.
-    targets = sample(40, lambda a: a["client_last_payment_date"] and a["account_status"] not in CLOSED_SET)
+    targets = sample(quota("A30"), lambda a: a["client_last_payment_date"] and a["account_status"] not in CLOSED_SET)
     for a in targets:
         after = rand_date(a["_placement"] + timedelta(days=10), TODAY)
         a["client_last_payment_date"] = iso(after)
@@ -1897,31 +2085,62 @@ def corrupt_accounts(accounts, users, clients):
            "Real and expensive: it causes double collection and client disputes. Compare "
            "client_last_payment_date against placement_date.")
 
-    # A26 -- consumers with several accounts, which is legitimate and worth spotting.
-    anchors = sample(30, lambda a: a["ssn"] and "-" in a["ssn"])
-    linked = []
-    for anchor in anchors:
-        others = sample(rnd.randint(2, 4), lambda a, anc=anchor: a["account_id"] != anc["account_id"])
-        for o in others:
-            for field in ("first_name", "last_name", "ssn", "date_of_birth", "address_line1",
-                          "city", "state", "zip_code", "phone_cell"):
-                o[field] = anchor[field]
-            linked.append(o["account_id"])
-    record("A26", "accounts", "ssn, last_name",
-           "Not a defect: roughly 30 consumers hold multiple accounts across different clients. "
-           "The set rewards recognizing this before deduplicating.",
-           [a["account_id"] for a in anchors],
-           "Distinguish these from the true duplicates in A15.")
+    # A32 -- "no address" written some way other than blank.
+    targets = sample(quota("A32"), lambda a: a["address_status"] == "NONE"
+                     and not (a["address_line1"] or a["city"] or a["state"] or a["zip_code"]))
+    for a in targets:
+        shape = weighted([("literal", 0.42), ("city_only", 0.28), ("po_box", 0.17), ("no_state", 0.13)])
+        city, state, zip5 = pick(CITIES)
+        if shape == "literal":
+            a["address_line1"] = pick(["UNKNOWN", "ADDRESS UNKNOWN", "NO ADDRESS ON FILE", "."])
+            a["city"], a["state"], a["zip_code"] = city, state, zip5
+        elif shape == "city_only":
+            a["city"], a["state"] = city, state
+        elif shape == "po_box":
+            a["address_line1"] = f"PO Box {rnd.randint(10, 9999)}"
+            a["state"], a["zip_code"] = state, zip5
+        else:
+            a["address_line1"], a["address_line2"] = make_address(state)
+            a["city"], a["zip_code"] = city, zip5
+    record("A32", "accounts", "address_line1, city, state, zip_code",
+           "Accounts with address_status NONE whose missing address is written some way other than blank: "
+           "a literal 'UNKNOWN' in address_line1, a city and state with no street, a PO box with no city, "
+           "or a street with no state.",
+           [a["account_id"] for a in targets],
+           "A1 counts every account with no usable address however it is written, so normalize these "
+           "before counting.")
 
-    # A15 and A26 copy a whole identity from one row to another, which can hand a
-    # complete address back to a row A1 had blanked. Re-derive A1 from the finished data.
-    incomplete = [a["account_id"] for a in accounts
-                  if not (a["address_line1"].strip() and a["city"].strip()
-                          and a["state"].strip() and a["zip_code"].strip())]
-    for issue in ISSUES:
-        if issue["code"] == "A1":
-            issue["count"] = len(incomplete)
-            issue["samples"] = incomplete[:6]
+    # A33 -- a phone number in a different format from the rest of the file.
+    def canonical_phones(a):
+        return [c for c in PHONE_COLUMNS if re.fullmatch(r"\d{3}-\d{3}-\d{4}", a[c])]
+
+    targets = sample(quota("A33"), canonical_phones)
+    for a in targets:
+        col = pick(canonical_phones(a))
+        a[col] = phone_in_format(re.sub(r"\D", "", a[col]), pick(PHONE_FORMATS[1:]))
+    record("A33", "accounts", "phone_home, phone_cell, phone_work",
+           "Phone numbers written in a different format from the rest of the file: (###) ###-####, "
+           "########## or ###.###.#### where every other number is ###-###-####.",
+           [a["account_id"] for a in targets],
+           "Normalize to digits before comparing numbers or counting distinct phones.")
+
+    # A34 -- a date of birth in US format.
+    targets = sample(quota("A34"), lambda a: re.fullmatch(r"\d{4}-\d{2}-\d{2}", a["date_of_birth"]))
+    for a in targets:
+        a["date_of_birth"] = date.fromisoformat(a["date_of_birth"]).strftime("%m/%d/%Y")
+    record("A34", "accounts", "date_of_birth",
+           "Dates of birth written MM/DD/YYYY where every other date in the file is YYYY-MM-DD.",
+           [a["account_id"] for a in targets],
+           "A date parser fixed to one format fails on these, or worse, reads some of them as the wrong day.")
+
+    # A35 -- a Social Security number without its dashes.
+    targets = sample(quota("A35"), lambda a: re.fullmatch(r"\d{3}-\d{2}-\d{4}", a["ssn"]))
+    for a in targets:
+        a["ssn"] = a["ssn"].replace("-", "")
+    record("A35", "accounts", "ssn",
+           "Social Security numbers stored as nine digits with no dashes where every other one is ###-##-####.",
+           [a["account_id"] for a in targets],
+           "Grouping or joining on ssn treats the same number written two ways as two different consumers.")
 
 
 def corrupt_payments(payments, accounts):
@@ -1929,17 +2148,15 @@ def corrupt_payments(payments, accounts):
     by_id = {a["account_id"]: a for a in accounts}
 
     def sample(k, predicate=None):
-        pool = [p for p in payments if predicate is None or predicate(p)]
-        rnd.shuffle(pool)
-        return pool[:k]
+        return take(payments, k, predicate)
 
-    targets = sample(12)
+    targets = sample(quota("P1"))
     for p in targets:
         p["account_id"] = rnd.choice([999999, 500000, 888888])
     record("P1", "payments", "account_id", "Payments referencing account_ids that are not in accounts.csv.",
            [p["payment_id"] for p in targets])
 
-    targets = sample(25, lambda p: by_id.get(p["account_id"], {}).get("_closed_date"))
+    targets = sample(quota("P2"), lambda p: by_id.get(p["account_id"], {}).get("_closed_date"))
     for p in targets:
         acct = by_id[p["account_id"]]
         newd = acct["_closed_date"] + timedelta(days=rnd.randint(10, 120))
@@ -1952,13 +2169,13 @@ def corrupt_payments(payments, accounts):
            [p["payment_id"] for p in targets],
            "Join to accounts.closed_date. Some of these are compliance problems, not just data problems.")
 
-    targets = sample(10, lambda p: p["payment_status"] == "POSTED")
+    targets = sample(quota("P3"), lambda p: p["payment_status"] == "POSTED")
     for p in targets:
         p["payment_amount"] = money(rnd.choice([0.0, 0.0, -25.0, -50.0]))
     record("P3", "payments", "payment_amount", "Posted payments with a zero or negative amount.",
            [p["payment_id"] for p in targets])
 
-    targets = sample(15, lambda p: p["payment_status"] == "POSTED")
+    targets = sample(quota("P4"), lambda p: p["payment_status"] == "POSTED")
     dupe_ids = []
     for p in targets:
         clone = dict(p)
@@ -1970,7 +2187,7 @@ def corrupt_payments(payments, accounts):
            "Duplicate payment rows: identical account, date, amount and transaction reference under two payment_ids.",
            dupe_ids, "Sample values are id pairs. Also inflates total collections if counted naively.")
 
-    targets = sample(6)
+    targets = sample(quota("P5"))
     for p in targets:
         d = TODAY + timedelta(days=rnd.randint(5, 90))
         p["payment_date"] = iso(d)
@@ -1978,13 +2195,13 @@ def corrupt_payments(payments, accounts):
     record("P5", "payments", "payment_date", "Payment dates in the future.",
            [p["payment_id"] for p in targets])
 
-    targets = sample(20)
+    targets = sample(quota("P6"))
     for p in targets:
         p["received_by_user_id"] = pick(["", "0", "9999", "UNKNOWN"])
     record("P6", "payments", "received_by_user_id", "Missing or invalid receiving user on the payment.",
            [p["payment_id"] for p in targets])
 
-    targets = sample(5, lambda p: p["account_id"] in valid_ids)
+    targets = sample(quota("P7"), lambda p: p["account_id"] in valid_ids)
     for p in targets:
         acct = by_id[p["account_id"]]
         d = acct["_placement"] - timedelta(days=rnd.randint(5, 60))
@@ -1994,7 +2211,7 @@ def corrupt_payments(payments, accounts):
            "Payments posted before the account was ever placed with the agency.",
            [p["payment_id"] for p in targets])
 
-    targets = sample(18, lambda p: p["payment_status"] == "POSTED" and p["payment_method"] == "CHECK")
+    targets = sample(quota("P8"), lambda p: p["payment_status"] == "POSTED" and p["payment_method"] == "CHECK")
     for p in targets:
         p["payment_method"] = pick(["check", "Check", "CHK", "ACH_DEBIT", "ach"])
     record("P8", "payments", "payment_method",
@@ -2007,11 +2224,9 @@ def corrupt_arrangements(arrangements, accounts):
     by_id = {a["account_id"]: a for a in accounts}
 
     def sample(k, predicate=None):
-        pool = [r for r in arrangements if predicate is None or predicate(r)]
-        rnd.shuffle(pool)
-        return pool[:k]
+        return take(arrangements, k, predicate)
 
-    targets = sample(60, lambda r: r["arrangement_status"] == "ACTIVE")
+    targets = sample(quota("R1"), lambda r: r["arrangement_status"] == "ACTIVE")
     for r in targets:
         r["next_payment_date"] = iso(TODAY - timedelta(days=rnd.randint(75, 400)))
     record("R1", "payment_arrangements", "arrangement_status, next_payment_date",
@@ -2019,7 +2234,7 @@ def corrupt_arrangements(arrangements, accounts):
            "but nothing reflects it.", [r["arrangement_id"] for r in targets],
            "These accounts are also still counted in 'accounts on a plan' reporting.")
 
-    targets = sample(18, lambda r: by_id.get(r["account_id"], {}).get("_closed_date")
+    targets = sample(quota("R2"), lambda r: by_id.get(r["account_id"], {}).get("_closed_date")
                      and r["arrangement_status"] in ("BROKEN", "CANCELLED", "COMPLETED"))
     for r in targets:
         r["arrangement_status"] = "ACTIVE"
@@ -2032,14 +2247,14 @@ def corrupt_arrangements(arrangements, accounts):
            [r["arrangement_id"] for r in targets],
            "Join arrangements to accounts.closed_date.")
 
-    targets = sample(30)
+    targets = sample(quota("R3"))
     for r in targets:
         r["installment_amount"] = money(round(float(r["installment_amount"]) * rnd.uniform(1.3, 2.2), 2))
     record("R3", "payment_arrangements", "installment_amount, number_of_installments, total_amount",
            "installment_amount times number_of_installments does not reconcile to total_amount.",
            [r["arrangement_id"] for r in targets])
 
-    targets = sample(12, lambda r: r["payments_made"] == "0")
+    targets = sample(quota("R4"), lambda r: r["payments_made"] == "0")
     for r in targets:
         r["payments_made"] = str(rnd.randint(2, 6))
         r["amount_paid_to_date"] = money(round(float(r["installment_amount"]) * int(r["payments_made"]), 2))
@@ -2047,7 +2262,7 @@ def corrupt_arrangements(arrangements, accounts):
            "Arrangements claiming payments were made when payments.csv has none for that arrangement.",
            [r["arrangement_id"] for r in targets])
 
-    targets = sample(10, lambda r: r["arrangement_status"] == "ACTIVE")
+    targets = sample(quota("R5"), lambda r: r["arrangement_status"] == "ACTIVE")
     clones = []
     for r in targets:
         clone = dict(r)
@@ -2060,7 +2275,7 @@ def corrupt_arrangements(arrangements, accounts):
            [f"{r['account_id']}" for r in clones],
            "Sample values are account_ids. Group by account_id where status = ACTIVE.")
 
-    targets = sample(8, lambda r: r["arrangement_status"] == "ACTIVE" and not r["broken_date"])
+    targets = sample(quota("R6"), lambda r: r["arrangement_status"] == "ACTIVE" and not r["broken_date"])
     for r in targets:
         r["broken_date"] = iso(TODAY - timedelta(days=rnd.randint(20, 200)))
         r["broken_reason"] = "MISSED SCHEDULED PAYMENT"
@@ -2088,12 +2303,13 @@ def parse_args():
         description="Generate a synthetic collections data set.",
         epilog=("Examples:\n"
                 "  python generate.py\n"
+                "  python generate.py --defects 1:1000\n"
                 "  python generate.py --accounts 500 --out sample\n"
                 '  python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md\n'
                 '  python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md\n'
                 "\n"
                 "The last two are the matched pair ab_check.py expects: same model,\n"
-                "different noise, so a scorecard fitted on A can be tested on B."),
+                "different noise, so a scorecard fitted on A can be tested honestly on B."),
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seed", default=SEED, metavar="SEED",
                     help='Any text or integer. The same seed and the same version of this '
@@ -2108,7 +2324,36 @@ def parse_args():
     ap.add_argument("--accounts", type=int, default=ACCOUNT_COUNT, metavar="N",
                     help="How many accounts to generate. Every other file scales with it. "
                          "Default: %(default)s")
+    ap.add_argument("--defects", type=parse_ratio, default=0.0, metavar="RATIO",
+                    help="How many defects to plant, as a share of all the records in the "
+                         "clean set across all six files. 1:1000, 1/1000, 0.001 and 0.1%% all "
+                         "mean one defect per thousand records. They are spread across the "
+                         "defect classes in fixed proportions, so rare classes drop out at "
+                         "sparse ratios. Default: 0, a clean set")
     return ap.parse_args()
+
+
+def build(notes_to):
+    """Build every table, writing the notes to notes_to as they are made.
+
+    Without a quota this is the clean data set. With one, the defects that have to
+    be woven in as the data is made (A27 and the note defects) go in on the way
+    through, from the defect stream. Everything else waits for plant_defects.
+    """
+    clients = build_clients()
+    users = build_users()
+    accounts = build_accounts(clients, users)
+    payments, arrangements = build_money(accounts, users)
+    _, note_count = build_notes(accounts, users, notes_to)
+    link_consumers(accounts)
+    return clients, users, accounts, payments, arrangements, note_count
+
+
+def ratio_text(rate):
+    """1:1000 where the rate is one in a whole number, a percentage otherwise."""
+    if rate > 0 and abs(1 / rate - round(1 / rate)) < 1e-6:
+        return f"1:{round(1 / rate)}"
+    return f"{rate:.3%}"
 
 
 def main():
@@ -2118,30 +2363,38 @@ def main():
     seed = args.seed
     if isinstance(seed, str) and seed.lstrip("-").isdigit():
         seed = int(seed)
-    rnd.seed(seed)
     OUT_DIR = args.out if os.path.isabs(args.out) else os.path.join(BASE_DIR, args.out)
     KEY_PATH = args.key if os.path.isabs(args.key) else os.path.join(BASE_DIR, args.key)
     ACCOUNT_COUNT = args.accounts
-    ISSUES.clear()
     os.makedirs(OUT_DIR, exist_ok=True)
     print(f'seed "{seed}" -> {os.path.relpath(OUT_DIR, BASE_DIR)}/')
 
-    clients = build_clients()
-    users = build_users()
-    accounts = build_accounts(clients, users)
-    payments, arrangements = build_money(accounts, users)
+    QUOTA.clear()
+    ISSUES.clear()
+    plan = None
+    if args.defects:
+        # The ratio is a share of the clean set, so build the clean set once just to
+        # count it. The defects never touch the base stream, so the second build below
+        # makes the same clean data and the count holds.
+        rnd.seed(seed)
+        counted = build(CountingWriter())
+        records = sum(len(table) for table in counted[:5]) + counted[5]
+        QUOTA.update(allocate_defects(args.defects, records))
+        plan = {"rate": args.defects, "records": records, "target": sum(QUOTA.values())}
+        ISSUES.clear()
 
-    # Notes are generated before the account corruption pass so that note text
-    # reflects the clean values, then the flags get broken underneath them.
+    rnd.seed(seed)
+    defect_rnd.seed(f"defects:{seed}")
+
     notes_path = os.path.join(OUT_DIR, "notes.csv")
     with open(notes_path, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
         w.writerow(NOTE_COLUMNS)
-        _, note_count = build_notes(accounts, users, w)
+        clients, users, accounts, payments, arrangements, note_count = build(w)
 
-    corrupt_accounts(accounts, users, clients)
-    corrupt_payments(payments, accounts)
-    corrupt_arrangements(arrangements, accounts)
+    if plan:
+        plant_defects(clients, users, accounts, payments, arrangements)
+    note_address_gaps(accounts)
 
     write_csv("clients.csv", CLIENT_COLUMNS, clients)
     write_csv("users.csv", USER_COLUMNS, users)
@@ -2149,29 +2402,41 @@ def main():
     write_csv("payments.csv", PAYMENT_COLUMNS, payments)
     write_csv("payment_arrangements.csv", ARRANGEMENT_COLUMNS, arrangements)
 
-    write_answer_key(accounts, payments, arrangements, note_count, clients, users)
+    write_answer_key(accounts, payments, arrangements, note_count, clients, users, plan)
 
     # Console summary
     closed = sum(1 for a in accounts if a["account_status"] in CLOSED_SET)
+    planted = sum(i["count"] for i in ISSUES if i["defect"])
     print(f"clients                {len(clients):>8,}")
     print(f"users                  {len(users):>8,}")
     print(f"accounts               {len(accounts):>8,}   ({closed:,} closed = {closed/len(accounts):.1%})")
     print(f"payments               {len(payments):>8,}")
     print(f"payment_arrangements   {len(arrangements):>8,}")
     print(f"notes                  {note_count:>8,}   ({note_count/len(accounts):.1f} per account)")
-    print(f"planted defects        {len(ISSUES):>8,}")
+    if plan:
+        print(f"planted defects        {planted:>8,}   ({ratio_text(plan['rate'])} of {plan['records']:,} "
+              f"clean records asks for {plan['target']:,})")
+    else:
+        print(f"planted defects        {planted:>8,}   (clean set; --defects plants some)")
 
 
-def write_answer_key(accounts, payments, arrangements, note_count, clients, users):
+def write_answer_key(accounts, payments, arrangements, note_count, clients, users, plan):
     closed = sum(1 for a in accounts if a["account_status"] in CLOSED_SET)
     lines = []
     lines.append("# Answer key")
     lines.append("")
-    lines.append("Every defect planted in this data set, plus the true coefficients of the "
-                 "propensity model. Written by `generate.py` on each run, so it always matches "
-                 "the files sitting next to it.")
-    lines.append("")
-    lines.append("Hold this back if you want someone to find the issues on their own.")
+    if plan:
+        lines.append("Every defect planted in this data set, plus the true coefficients of the "
+                     "propensity model. Written by `generate.py` on each run, so it always matches "
+                     "the files sitting next to it.")
+        lines.append("")
+        lines.append("Hold this back if you want someone to find the issues on their own.")
+    else:
+        lines.append("This data set is clean. It was generated without `--defects`, so nothing in it "
+                     "was deliberately damaged. This file holds the true coefficients of the "
+                     "propensity model and the real conditions in the data that are not defects. "
+                     "Written by `generate.py` on each run, so it always matches the files sitting "
+                     "next to it.")
     lines.append("")
     lines.append("## Volumes")
     lines.append("")
@@ -2184,12 +2449,27 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
     lines.append(f"| payment_arrangements.csv | {len(arrangements):,} |")
     lines.append(f"| notes.csv | {note_count:,} |")
     lines.append("")
+    if plan:
+        planted_total = sum(i["count"] for i in ISSUES if i["defect"])
+        lines.append("## How many defects")
+        lines.append("")
+        lines.append(f"This set was generated with `--defects {ratio_text(plan['rate'])}`. The clean set "
+                     f"holds {plan['records']:,} records across the six files, so that ratio asks for "
+                     f"{plan['target']:,} defect instances, shared out across the defect classes in fixed "
+                     f"proportions. {planted_total:,} were planted"
+                     + ("." if planted_total >= plan["target"] else
+                        ", because some classes could not place their whole share, for example "
+                        "an SSN shared by one account instead of two.")
+                     + " An instance is one planted problem as counted below, usually one row or, for "
+                     "the duplicates, one id pair. One row can carry more than one defect, and the "
+                     "volumes above include the extra rows that some defects add.")
+        lines.append("")
     lines.append("## Identifier safety")
     lines.append("")
     lines.append("Every phone number in the set uses the 555 exchange and every SSN breaks an SSA "
                  "issuance rule (area 000 / 666 / 900-999, group 00, or serial 0000), so none of them "
                  "can reach or identify a real "
-                 "person. Defect A11 is junk typed into the SSN field, not an invalid SSN, because "
+                 "person. Defect A11, when it is planted, is junk typed into the SSN field, not an invalid SSN, because "
                  "every SSN here is already unissuable.")
     lines.append("")
     liq = sum(1 for a in accounts if float(a["total_paid"].replace("$", "").replace(",", "") or 0) > 0)
@@ -2258,58 +2538,90 @@ def write_answer_key(accounts, payments, arrangements, note_count, clients, user
     lines.append("")
     lines.append("## Fields that are always reliable")
     lines.append("")
-    lines.append("These are populated on every account row and are internally consistent, so they "
-                 "are safe to anchor on: `account_id`, `client_account_number`, `placement_date`, "
-                 "`account_status`, `status_date`, `original_balance`, `placement_balance`. Note that "
-                 "`placement_balance` carries a dollar sign on twelve rows (defect A21); the value itself "
-                 "is still correct.")
-    lines.append("")
-    lines.append("## Planted defects")
+    reliable = ("These are populated on every account row and are internally consistent, so they "
+                "are safe to anchor on: `account_id`, `client_account_number`, `placement_date`, "
+                "`account_status`, `status_date`, `original_balance`, `placement_balance`.")
+    dollar_rows = next((i["count"] for i in ISSUES if i["code"] == "A21"), 0)
+    if dollar_rows:
+        reliable += (f" Note that `placement_balance` carries a dollar sign on {dollar_rows:,} rows "
+                     f"(defect A21); the value itself is still correct.")
+    lines.append(reliable)
     lines.append("")
     def code_key(issue):
         code = issue["code"]
         digits = "".join(c for c in code if c.isdigit())
         return (code[0], int(digits or 0), code)
 
-    by_table = {}
-    for issue in ISSUES:
-        by_table.setdefault(issue["table"], []).append(issue)
-    for table in by_table:
-        by_table[table].sort(key=code_key)
-    for table in ["accounts", "payments", "payment_arrangements", "notes", "clients", "users"]:
-        if table not in by_table:
-            continue
-        lines.append(f"### {table}")
-        lines.append("")
-        for issue in by_table[table]:
-            samples = ", ".join(str(s) for s in issue["samples"])
-            lines.append(f"**{issue['code']} - {issue['columns']}** ({issue['count']} rows)")
+    def write_sections(issues):
+        by_table = {}
+        for issue in issues:
+            by_table.setdefault(issue["table"], []).append(issue)
+        for table in ["accounts", "payments", "payment_arrangements", "notes", "clients", "users"]:
+            if table not in by_table:
+                continue
+            lines.append(f"### {table}")
             lines.append("")
-            lines.append(issue["description"])
-            if issue["hint"]:
+            for issue in sorted(by_table[table], key=code_key):
+                samples = ", ".join(str(s) for s in issue["samples"])
+                lines.append(f"**{issue['code']} - {issue['columns']}** ({issue['count']} rows)")
                 lines.append("")
-                lines.append(f"*{issue['hint']}*")
+                lines.append(issue["description"])
+                if issue["hint"]:
+                    lines.append("")
+                    lines.append(f"*{issue['hint']}*")
+                lines.append("")
+                lines.append(f"Sample ids: {samples}")
+                lines.append("")
+
+    lines.append("## Planted defects")
+    lines.append("")
+    planted_issues = [i for i in ISSUES if i["defect"] and i["count"]]
+    if planted_issues:
+        write_sections(planted_issues)
+        skipped = sorted((i for i in ISSUES if i["defect"] and not i["count"]), key=code_key)
+        if skipped:
+            lines.append("**Not planted at this ratio:** " + ", ".join(i["code"] for i in skipped) + ".")
             lines.append("")
-            lines.append(f"Sample ids: {samples}")
-            lines.append("")
+    elif plan:
+        lines.append("None. At this ratio the data set is too small for any defect to be planted.")
+        lines.append("")
+    else:
+        lines.append("None. This data set was generated without `--defects`.")
+        lines.append("")
+    lines.append("## Conditions that are not defects")
+    lines.append("")
+    lines.append("These look like problems but are real features of the data, so they are present "
+                 "whether or not `--defects` was used. Do not count them as defects.")
+    lines.append("")
+    write_sections([i for i in ISSUES if not i["defect"]])
     lines.append("## What this data is good for")
     lines.append("")
-    for item in [
-        "Load it into your warehouse or application and see which columns the ingest chokes "
-        "on. The embedded newlines, the dollar signs in numeric columns and the two date "
-        "formats are all there on purpose.",
-        "Profile every file and produce a data dictionary without being told the schema.",
-        "Reconcile `accounts.total_paid` against the sum of POSTED payments and explain each break.",
-        "Find every account where the notes contradict the compliance flags (A8, N4a, N4b).",
-        "Build a collector performance report from notes and payments, then explain why the numbers "
-        "are wrong until terminated users and duplicate payments are handled.",
-        "Identify accounts that should never have been worked: bankruptcy, deceased, cease and desist.",
-        "Measure liquidation rate by client and by placement year, and defend the denominator chosen.",
-        "Count how many distinct consumers exist. The answer depends on how A12, A15 and A26 are treated.",
-        "Rebuild status_class from account_status and find the rows where the stored rollup disagrees, then say what that does to an open inventory count.",
-        "Find the FDCPA calling-window violations in the notes (N3).",
+    planted_codes = {i["code"] for i in planted_issues}
+    for item, codes in [
+        ("Load it into your warehouse or application as a known good baseline, then load a copy "
+         "generated with `--defects` from the same seed and see what the damage does to your pipeline.", ()),
+        ("Load it into your warehouse or application and see which columns the ingest chokes "
+         "on. The embedded newlines, the dollar signs in numeric columns and the mixed date "
+         "formats are all planted on purpose.", ("N6", "A21", "A34")),
+        ("Profile every file and produce a data dictionary without being told the schema.", ()),
+        ("Reconcile `accounts.total_paid` against the sum of POSTED payments and explain each break.",
+         ("A20a", "A20b")),
+        ("Find every account where the notes contradict the compliance flags (A8, N4a, N4b).",
+         ("A8", "N4a", "N4b")),
+        ("Build a collector performance report from notes and payments, then explain why the numbers "
+         "are wrong until terminated users and duplicate payments are handled.", ("A16a", "P4")),
+        ("Identify accounts that should never have been worked: bankruptcy, deceased, cease and desist.",
+         ("A8", "N4a", "N7", "P2")),
+        ("Fit a placement scorecard and compare what it learns with the coefficients above.", ()),
+        ("Measure liquidation rate by client and by placement year, and defend the denominator chosen.", ()),
+        ("Count how many distinct consumers exist. The answer depends on how the multi-account "
+         "consumers (A26) are treated, and on A12 and A15 where they are planted.", ()),
+        ("Rebuild status_class from account_status and find the rows where the stored rollup disagrees, "
+         "then say what that does to an open inventory count.", ("A29",)),
+        ("Find the FDCPA calling-window violations in the notes (N3).", ("N3",)),
     ]:
-        lines.append(f"- {item}")
+        if not codes or planted_codes & set(codes):
+            lines.append(f"- {item}")
     lines.append("")
     with open(KEY_PATH, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))

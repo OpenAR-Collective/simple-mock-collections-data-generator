@@ -41,18 +41,23 @@ ZIP_TIMESTAMP = (2026, 8, 20, 0, 0, 0)
 CSV_FILES = ["clients.csv", "users.csv", "accounts.csv", "payments.csv",
              "payment_arrangements.csv", "notes.csv"]
 
-# The first set uses generate.py's own defaults, so the published archive matches
-# what anyone gets by cloning and running the script with no arguments.
+# generate.py plants no defects unless asked, so the published sets ask. One defect per
+# hundred records is dense enough that every defect class shows up in the answer key.
+# The first set otherwise uses generate.py's own defaults, so the published archive
+# matches what anyone gets by cloning and running "python generate.py --defects 1:100".
+DEFECTS = "1:100"
+
 DATASETS = [
     {"label": "default seed",
-     "args": [],
+     "args": ["--defects", DEFECTS],
      "data_dir": "data",
      "key_src": "ANSWER_KEY.md",
      "zip_name": "acme-collections-data.zip",
      "key_name": "ANSWER_KEY.md"},
     {"label": 'seed "Data 2"',
      "args": ["--seed", "Data 2", "--out", "data_2",
-              "--key", os.path.join("data_2", "ANSWER_KEY.md")],
+              "--key", os.path.join("data_2", "ANSWER_KEY.md"),
+              "--defects", DEFECTS],
      "data_dir": "data_2",
      "key_src": os.path.join("data_2", "ANSWER_KEY.md"),
      "zip_name": "acme-collections-data-2.zip",

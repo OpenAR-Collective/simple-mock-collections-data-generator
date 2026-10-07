@@ -7,11 +7,7 @@ consumer records: building or demoing agency software, testing an ETL pipeline o
 reporting stack, prototyping a liquidation scorecard, writing training material, or
 pointing an AI tool at an operational data set to see how it copes.
 
-The data looks like a system that has been running for five years, which means it also
-has the flaws of one. Sixty four classes of data quality defect are planted on purpose,
-catalogued automatically as they are applied and written to a generated answer key.
-That is deliberate. Data that is too clean tells you nothing about whether your pipeline,
-your report or your model survives contact with production.
+By default the data is clean. The generator can also damage it on request: `--defects` plants sixty four classes of data quality defect at whatever ratio you choose, catalogs each one as it is applied, and writes the list to a generated answer key. Data that is too clean tells you nothing about whether your pipeline, your report or your model survives contact with production, so the published downloads are the damaged kind, and the clean version is one command away.
 
 Liquidation is not random either. Each account carries a latent propensity to pay built
 from the drivers that matter in real collections, so the data supports building an
@@ -32,6 +28,8 @@ If you just want the data, take the archive. Nothing to install, nothing to run.
 | [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 23 KB | Every planted defect in that set and the true propensity coefficients |
 | [Second data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data-2.zip) | 6.9 MB | An independent second set, same shape and same underlying model |
 | [Second answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY-2.md) | 23 KB | The matching catalog for the second set |
+
+Both published sets were generated with `--defects 1:100`, which is about one planted defect for every hundred records and is dense enough for every defect class to appear. The generator's own default is a clean set, so pass that flag to build a set like these.
 
 Two data sets are published because they share one underlying propensity model and differ
 only in noise. That makes them a ready made train and holdout pair: fit a scorecard on one,
@@ -54,9 +52,7 @@ pair of data sets to train and test a model on.
 
 **Nothing to install.** You need Python 3.8 or newer and nothing else. There is no
 `pip install` step, no `requirements.txt` and no virtual environment, because every
-script here uses only the standard library: `argparse`, `csv`, `math`, `os`, `random`
-and `datetime`. That is deliberate, so the data can be regenerated on a locked down
-machine or inside a container with no package access.
+script here uses only the standard library: `argparse`, `contextlib`, `csv`, `math`, `os`, `random`, `re` and `datetime`. That is deliberate, so the data can be regenerated on a locked down machine or inside a container with no package access.
 
 ```bash
 git clone https://github.com/OpenAR-Collective/simple-mock-collections-data-generator.git
@@ -72,23 +68,33 @@ python generate.py
 
 On Windows, use `py generate.py` if `python` is not on your PATH.
 
-That writes the six CSV files into a `data/` directory next to the script, writes
-`ANSWER_KEY.md` alongside it, and prints a summary:
+That writes the six CSV files into a `data/` directory next to the script, writes `ANSWER_KEY.md` alongside it, and prints a summary. The data is clean, which means nothing in it was deliberately damaged:
 
 ```
 clients                      22
 users                        49
-accounts                 10,000   (3,529 closed = 35.3%)
-payments                 12,657
-payment_arrangements      2,135
-notes                   195,897   (19.6 per account)
-planted defects              64
+accounts                 10,000   (3,518 closed = 35.2%)
+payments                 12,742
+payment_arrangements      2,141
+notes                   195,712   (19.6 per account)
+planted defects               0   (clean set; --defects plants some)
+```
+
+To plant defects, say how many:
+
+```bash
+python generate.py --defects 1:100
+```
+
+That is one planted defect for every hundred records, which is what the published downloads use. The summary then ends with a line like this one, and the answer key lists every defect that went in:
+
+```
+planted defects           2,205   (1:100 of 220,666 clean records asks for 2,207)
 ```
 
 ### Command line arguments
 
-`generate.py` takes four optional arguments. Run it with no arguments and you get the
-defaults below.
+`generate.py` takes five optional arguments. Run it with no arguments and you get the defaults below, which is a clean data set.
 
 | Argument | Default | What it does |
 | --- | --- | --- |
@@ -96,6 +102,7 @@ defaults below.
 | `--out DIR` | `data` | Directory for the six CSV files, created if missing. Relative to the script unless absolute |
 | `--key PATH` | `ANSWER_KEY.md` | Where to write the answer key. Relative to the script unless absolute |
 | `--accounts N` | `10000` | How many accounts to generate. Every other file scales with it |
+| `--defects RATIO` | `0` | How many defects to plant, as a share of all the records in the clean set. `1:1000`, `1/1000`, `0.001` and `0.1%` all mean one defect per thousand records. `0`, `off` and `none` leave the data clean. See [Planting defects](#planting-defects) |
 
 A few things they are useful for. A small set you can open in a spreadsheet:
 
@@ -109,8 +116,7 @@ A second data set that does not overwrite your first:
 python generate.py --seed "Data Set B" --out data_b --key ANSWER_KEY_B.md
 ```
 
-`python generate.py --help` prints the same list. The whole run takes a few seconds and
-produces about 41 MB at the default size. To confirm the output is sound, run the checks:
+`python generate.py --help` prints the same list. The whole run takes a few seconds, a few more with `--defects` because the clean set is built once to count its records, and produces about 42 MB at the default size. To confirm the output is sound, run the checks:
 
 ```bash
 python validate.py
@@ -118,6 +124,28 @@ python validate.py
 
 The generated files are not committed to this repository; `data/` is in `.gitignore`.
 The generator is seeded, so any two people who run it get byte identical files.
+
+### Planting defects
+
+`--defects` takes a ratio of defects to records, written however comes naturally: `1:1000`, `1/1000`, `0.001` and `0.1%` all mean one planted defect for every thousand records. Leave it off, or pass `0`, `off` or `none`, and the data is clean.
+
+The ratio is counted against the clean data set across all six files together. At the default size the clean set holds about 220,000 records, so `1:1000` plants about 220 defects and `1:100` plants about 2,200. A set built with `--accounts 500` is smaller, so the same ratio plants proportionally fewer.
+
+Those defects are shared out across the 64 defect classes in fixed proportions. Name casing problems, stripped ZIP zeros and collectors who have left are common, an orphaned `client_id` is rare, and that is the mix the answer key has always had. At a sparse ratio the rare classes simply do not appear, and the answer key lists the ones that were not planted. A ratio around `1:100` is dense enough that every class shows up. A very high ratio can run a class out of eligible rows, and the key then says how many defects were asked for and how many fit.
+
+A defect is counted the way the answer key counts it, which is usually one row and for duplicates one pair of ids. Some classes add rows of their own, such as duplicate payments, duplicate arrangements and the extra notes behind the compliance defects, and one row can carry more than one defect.
+
+Defects draw from their own random stream, so the same seed with and without `--defects` produces the same clean data underneath. Generate both and compare them to see exactly what the damage did to your pipeline:
+
+```bash
+python generate.py --seed "Data Set A" --out clean_a
+```
+
+```bash
+python generate.py --seed "Data Set A" --defects 1:1000 --out damaged_a --key ANSWER_KEY_DAMAGED_A.md
+```
+
+Every row in `clean_a` is also in `damaged_a` with the same id, except for the cells the answer key lists. Rows that defects add are appended at the end of their file, so no clean row moves. The one other exception is A27, a settlement planted below the client's floor, because it changes the money on that account's payments and arrangement, and the notes that quote them, and not only the account row.
 
 ### Tuning what the arguments do not cover
 
@@ -130,6 +158,7 @@ the file:
 | `TODAY` | `2026-08-20` | The "now" every date in the set is relative to. Fixed rather than the real clock, so a set generated today and one generated next year are comparable |
 | `HISTORY_START` | `TODAY` minus 1,826 days | How far back placements go, five years by default |
 | `NOTE_ACTIVITY_MEAN` | `16` | Collector activity notes per account, before system notes are added |
+| `DEFECT_MIX` | per class | How `--defects` shares its total across the defect classes. Raise a weight to make a class more common, or set it to 0 to leave that class out |
 
 The propensity coefficients further down the file are tunable in the same way, and are
 documented under [Propensity to pay](#propensity-to-pay).
@@ -144,6 +173,8 @@ The default seed is the text `"Sample Seed"`. Any text works, as does any intege
 `SEED = "regression-suite-2026"` is fine. Python derives a text seed from a SHA-512 of
 the characters rather than from `hash()`, so it gives the same result on every machine
 and is unaffected by `PYTHONHASHSEED`.
+
+The ratio is part of what names a data set. The same seed with a different `--defects` value gives the same clean data with a different set of defects planted in it, and the same seed and the same ratio give byte identical files.
 
 Two things to know:
 
@@ -203,7 +234,7 @@ fitted model against the truth.
 
 Because the coefficients are fixed constants rather than seeded values, two data sets
 built from different seeds share one underlying model and differ only in noise. That
-makes a clean train and holdout pair: learn the pattern on A, prove it on B.
+makes a train and holdout pair: learn the pattern on A, prove it on B.
 
 ```bash
 python generate.py --seed "Data Set A" --out data_a --key ANSWER_KEY_A.md
@@ -224,18 +255,15 @@ A representative run:
 
 ```
 Model fitted on A, applied unchanged to B
-  AUC on A (in sample)     0.7584
-  AUC on B (never seen)    0.7591
-  difference               0.0007
+  AUC on A (in sample)     0.7556
+  AUC on B (never seen)    0.7597
+  difference               0.0041
 ```
 
 An AUC near 0.75 is deliberate. The model has a noise term precisely so that a perfect
 score is impossible, which is what a real collections scorecard looks like.
 
-The target is any posted payment, taken from `payments.csv` rather than from
-`accounts.total_paid`, because that column is one of the planted defects. Cleaning the
-data is part of the job: dollar signs in balance columns, returned payments that must
-not be counted, and duplicate payment rows all move the numbers if they are ignored.
+The target is any posted payment, taken from `payments.csv` rather than from `accounts.total_paid`, because in a set generated with `--defects` that column is one of the planted defects (A20b). Returned payments must not be counted either, and in a damaged set the dollar signs in balance columns and the duplicate payment rows move the numbers if they are ignored. The result is the same on a clean pair and on a pair generated with `--defects 1:100`, so add that flag to both generate commands above to watch the scorecard survive the damage.
 
 **On the self fulfilling drivers.** Prior payment and promise to pay predict future
 payment enormously well, and that is exactly the problem: an account that has already
@@ -265,8 +293,7 @@ The identifiers are not merely made up, they are impossible on purpose:
   them can belong to a person. The 900-999 numbers additionally avoid the group ranges
   the IRS uses for ITINs, so they cannot collide with a real taxpayer identifier either.
 
-The handful of deliberately broken phone numbers in the data use area codes of 000,
-111 and 999, which are unassignable, so they are unreachable as well.
+The deliberately broken phone numbers that `--defects` plants use area codes of 000, 111 and 999, which are unassignable, so they are unreachable as well.
 
 ## What the generator produces
 
@@ -275,16 +302,14 @@ Everything below lands in `data/`, which is not tracked in this repository. Run
 
 | File | Rows | Size | What it holds |
 | --- | ---: | ---: | --- |
-| `data/accounts.csv` | 10,000 | 4.1 MB | One row per placed account, with the consumer's details on the same row |
-| `data/notes.csv` | 195,897 | 35 MB | Collection activity notes, roughly 20 per account |
-| `data/payments.csv` | 12,657 | 2.1 MB | Payment transactions, including returns and reversals |
-| `data/payment_arrangements.csv` | 2,135 | 390 KB | Installment plans and settlement agreements |
+| `data/accounts.csv` | 10,000 | 4.4 MB | One row per placed account, with the consumer's details on the same row |
+| `data/notes.csv` | 195,712 | 35 MB | Collection activity notes, roughly 20 per account |
+| `data/payments.csv` | 12,742 | 2.0 MB | Payment transactions, including returns and reversals |
+| `data/payment_arrangements.csv` | 2,141 | 366 KB | Installment plans and settlement agreements |
 | `data/clients.csv` | 22 | 5 KB | The creditors that place accounts with the agency |
 | `data/users.csv` | 49 | 6 KB | Agency staff, from collectors to compliance |
 
-All files are UTF-8, comma delimited, with a header row and RFC 4180 quoting. Note
-that `notes.csv` contains free text with embedded commas, quotes and line breaks, so
-it has to be read with a real CSV parser rather than split on newlines.
+All files are UTF-8, comma delimited, with a header row and RFC 4180 quoting. The free text in `notes.csv` contains embedded commas and quotes, and in a set generated with `--defects` some notes also contain line breaks, so read it with a real CSV parser rather than splitting on newlines.
 
 ## How the files relate
 
@@ -497,7 +522,7 @@ so this file is worth reading before drawing conclusions about the accounts.
 
 ### users.csv
 
-Agency staff. Collectors leave, and the accounts they were working do not always follow.
+Agency staff. Collectors leave, and in a set generated with `--defects` some of the accounts they were working stay assigned to them.
 
 | Column | Description |
 | --- | --- |
@@ -514,12 +539,7 @@ Agency staff. Collectors leave, and the accounts they were working do not always
 
 ## A word of warning about the data
 
-This set was built to look like a real production database that has been running for
-five years, which means it has the flaws of one. Values are missing, some records
-contradict each other, some records contradict the notes written about them, and a few
-are impossible on their face. That is intentional. Assume nothing is clean until it has
-been checked, and expect that the answer to a question often depends on how the messy
-rows are treated.
+A default run is clean in the sense that nothing was damaged. Some values are still missing, because the client never sent them (accounts with no address, for instance), and that is real signal rather than a defect. A set generated with `--defects` is built to look like a real production database that has been running for five years, which means it has the flaws of one. Values are missing, some records contradict each other, some records contradict the notes written about them, and a few are impossible on their face. That is intentional. Assume nothing is clean until it has been checked, and expect that the answer to a question often depends on how the messy rows are treated.
 
 A handful of fields are dependable. Every account has an `account_id`,
 `client_account_number`, `placement_date`, `account_status`, `status_date`,
@@ -539,10 +559,7 @@ A handful of fields are dependable. Every account has an `account_id`,
 
 ## The answer key
 
-`ANSWER_KEY.md` lists every planted defect with its counts and sample record ids, plus
-the exact coefficients of the propensity model. It is written on every run and is not
-tracked in git, since its contents change with the seed and committing it would produce
-a large diff on every run for no benefit. Run the generator and read your own copy.
+`ANSWER_KEY.md` lists every planted defect with its counts and sample record ids, plus the exact coefficients of the propensity model. For a run without `--defects` it lists no defects, only the coefficients and the few real conditions that look like problems but are not: accounts with no address, consumers who hold several accounts, wasted dialing on dead numbers, and the duplicate Mercy Regional client code. It is written on every run and is not tracked in git, since its contents change with the seed and committing it would produce a large diff on every run for no benefit. Run the generator and read your own copy.
 
 The defect catalog is not a secret either way, since `generate.py` describes every defect
 inline. If you want someone to find the issues on their own, whether that is a new
