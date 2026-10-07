@@ -24,10 +24,10 @@ If you just want the data, take the archive. Nothing to install, nothing to run.
 
 | Download | Size | What is in it |
 | --- | ---: | --- |
-| [Data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data.zip) | 6.9 MB | 10,000 accounts and all six CSV files, plus this data dictionary |
-| [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 23 KB | Every planted defect in that set and the true propensity coefficients |
-| [Second data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data-2.zip) | 6.9 MB | An independent second set, same shape and same underlying model |
-| [Second answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY-2.md) | 23 KB | The matching catalog for the second set |
+| [Data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data.zip) | 6.8 MB | 10,000 accounts and all six CSV files, plus this data dictionary |
+| [Answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY.md) | 25 KB | Every planted defect in that set and the true propensity coefficients |
+| [Second data set](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/acme-collections-data-2.zip) | 6.8 MB | An independent second set, same shape and same underlying model |
+| [Second answer key](https://github.com/OpenAR-Collective/simple-mock-collections-data-generator/releases/latest/download/ANSWER_KEY-2.md) | 25 KB | The matching catalog for the second set |
 
 Both published sets were generated with `--defects 1:100`, which is about one planted defect for every hundred records and is dense enough for every defect class to appear. The generator's own default is a clean set, so pass that flag to build a set like these.
 
